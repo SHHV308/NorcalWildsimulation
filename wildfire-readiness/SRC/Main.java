@@ -9,8 +9,8 @@ public class Main {
     private static final int COLS = 100;
     private static final String CSV_FILE =
             "Data/northern_california_100x100_java_grid.csv";
-    private static final double DEFAULT_LATITUDE = 40.5862;
-    private static final double DEFAULT_LONGITUDE = -122.3914;
+    private static final double DEFAULT_LATITUDE = 39.6999;
+    private static final double DEFAULT_LONGITUDE = -121.9674;
 
     public static void main(String[] args) {
         int[][] vegetationGrid = new int[ROWS][COLS];

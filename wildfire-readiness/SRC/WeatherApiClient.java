@@ -5,6 +5,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -45,19 +47,19 @@ public final class WeatherApiClient {
             throw new IOException("NWS returned no observation stations for this location.");
         }
 
-        // Try the nearest few stations. Some stations report no wind direction
-        // or have an old reading, so keep going until one is usable.
+        // NWS does not list stations by distance, so sort them by distance from
+        // the requested point. Try the nearest few: some stations report no wind
+        // direction or have an old reading, so keep going until one is usable.
         WeatherObservation firstReading = null;
         IOException lastError = null;
         int tried = 0;
-        for (Object feature : features) {
+        for (Map<String, Object> feature : nearestFirst(features, latitude, longitude)) {
             if (tried >= MAX_STATIONS_TO_TRY) {
                 break;
             }
             tried++;
             try {
-                WeatherObservation observation =
-                        fetchStationObservation(JsonParser.object(feature));
+                WeatherObservation observation = fetchStationObservation(feature);
                 if (isUsable(observation)) {
                     return observation;
                 }
@@ -75,6 +77,40 @@ public final class WeatherApiClient {
             throw lastError;
         }
         throw new IOException("NWS returned no usable observation for this location.");
+    }
+
+    /** Stations sorted by distance from the point. Stations without coordinates keep their order, after the rest. */
+    private static List<Map<String, Object>> nearestFirst(
+            List<Object> features, double latitude, double longitude) {
+        List<Map<String, Object>> stations = new ArrayList<>();
+        for (Object feature : features) {
+            stations.add(JsonParser.object(feature));
+        }
+        stations.sort(Comparator.comparingDouble(
+                station -> distanceKm(station, latitude, longitude)));
+        return stations;
+    }
+
+    private static double distanceKm(Map<String, Object> station, double latitude, double longitude) {
+        Object geometry = station.get("geometry");
+        if (!(geometry instanceof Map)) {
+            return Double.MAX_VALUE;
+        }
+        Object coordinates = JsonParser.object(geometry).get("coordinates");
+        if (!(coordinates instanceof List) || ((List<?>) coordinates).size() < 2) {
+            return Double.MAX_VALUE;
+        }
+        Double stationLongitude = JsonParser.number(((List<?>) coordinates).get(0));
+        Double stationLatitude = JsonParser.number(((List<?>) coordinates).get(1));
+        if (stationLongitude == null || stationLatitude == null) {
+            return Double.MAX_VALUE;
+        }
+        double dLat = Math.toRadians(stationLatitude - latitude);
+        double dLon = Math.toRadians(stationLongitude - longitude);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(latitude)) * Math.cos(Math.toRadians(stationLatitude))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        return 2 * 6371.0088 * Math.asin(Math.sqrt(a));
     }
 
     /** Fresh reading that has a wind speed and either a direction or calm air. */

@@ -15,7 +15,7 @@ public class StationFallbackTest {
         try {
             URI base = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
             WeatherApiClient client = new WeatherApiClient(HttpClient.newHttpClient(), base);
-            for (String s : new String[] {"A", "B", "C", "D", "E"}) {
+            for (String s : new String[] {"A", "B", "C", "D", "E", "F", "G"}) {
                 scenario.set(s);
                 try {
                     WeatherObservation o = client.fetchLatest(39.7, -121.97);
@@ -42,8 +42,10 @@ public class StationFallbackTest {
         if (path.startsWith("/points/")) {
             body = "{\"properties\":{\"observationStations\":\"http://127.0.0.1:" + port + "/stations\"}}";
         } else if (path.equals("/stations")) {
+            boolean geo = sc.equals("F") || sc.equals("G");
             body = "{\"features\":["
-                + feat(port,"AAA1") + "," + feat(port,"BBB2") + "," + feat(port,"CCC3") + "]}";
+                + feat(port,"AAA1", geo ? 0.33 : null) + "," + feat(port,"BBB2", geo ? 0.126 : null)
+                + "," + feat(port,"CCC3", geo ? 0.20 : null) + "]}";
         } else {
             String st = path.split("/")[2];
             // A: AAA1 has speed but no direction (not calm) -> should fall through to BBB2
@@ -55,6 +57,9 @@ public class StationFallbackTest {
             if (sc.equals("A") && st.equals("AAA1")) { spd = "36"; dir = "null"; }
             if (sc.equals("B") && st.equals("AAA1")) { spd = "0"; dir = "null"; }
             if (sc.equals("C")) { ts = old; }
+            // F: stations have coordinates; BBB2 is nearest although listed second -> BBB2 chosen
+            // G: nearest (BBB2) has an old reading -> next nearest (CCC3) chosen
+            if (sc.equals("G") && st.equals("BBB2")) { ts = old; }
             if ((sc.equals("D") && st.equals("AAA1")) || sc.equals("E")) { status = 503; }
             body = "{\"properties\":{\"stationId\":\"" + st + "\",\"timestamp\":\"" + ts + "\","
                 + "\"windSpeed\":{\"value\":" + spd + ",\"unitCode\":\"wmoUnit:km_h-1\"},"
@@ -66,8 +71,10 @@ public class StationFallbackTest {
         ex.sendResponseHeaders(status, b.length);
         ex.getResponseBody().write(b); ex.close();
     }
-    static String feat(int port, String id) {
-        return "{\"id\":\"http://127.0.0.1:" + port + "/stations/" + id
-            + "\",\"properties\":{\"stationIdentifier\":\"" + id + "\",\"name\":\"" + id + "\"}}";
+    static String feat(int port, String id, Double degreesNorth) {
+        String geometry = degreesNorth == null ? ""
+            : "\"geometry\":{\"type\":\"Point\",\"coordinates\":[-121.97," + (39.7 + degreesNorth) + "]},";
+        return "{\"id\":\"http://127.0.0.1:" + port + "/stations/" + id + "\"," + geometry
+            + "\"properties\":{\"stationIdentifier\":\"" + id + "\",\"name\":\"" + id + "\"}}";
     }
 }

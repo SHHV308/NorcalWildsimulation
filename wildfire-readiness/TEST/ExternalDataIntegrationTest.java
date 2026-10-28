@@ -234,13 +234,13 @@ public final class ExternalDataIntegrationTest {
                     "raw raster code remains available as supporting tooltip detail");
             require(containsLabel(gui, "0, 0"),
                     "selected-cell panel shows the selected cell row and column");
-            require(containsLabel(gui, "40.5862, -122.3914"),
+            require(containsLabel(gui, "39.6999, -121.9674"),
                     "selected-cell panel shows coordinates at the selected location");
             require(containsLabel(gui, "No ETA"),
                     "selected-cell panel explains when no fire ETA is available");
             javax.swing.JComboBox<?> locationSelector = findComboBox(gui);
             require(locationSelector != null, "location selector is available");
-            locationSelector.setSelectedIndex(1);
+            locationSelector.setSelectedIndex(2);
             require(containsLabel(gui, "38.5816, -121.4944"),
                     "selected-cell coordinates update when the map location changes");
 

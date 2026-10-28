@@ -79,6 +79,7 @@ public class FireSimulationGUI extends JPanel {
     private final JButton hypotheticalFireButton =
             new JButton("Model fire starting at searched location");
     private final JComboBox<GeoLocation> locationChoice = new JComboBox<>(new GeoLocation[] {
+            new GeoLocation("Butte County grid center (near Chico)", 39.6999, -121.9674),
             new GeoLocation("Redding, CA (96001)", 40.5862, -122.3914),
             new GeoLocation("Sacramento, CA (95814)", 38.5816, -121.4944),
             new GeoLocation("Chico, CA (95926)", 39.7285, -121.8375),
@@ -86,7 +87,7 @@ public class FireSimulationGUI extends JPanel {
     });
     private final JTextField locationSearchField = new JTextField(13);
     private final JButton locationSearchButton = new JButton("Search");
-    private final JLabel locationSearchStatus = new JLabel("Map centered on Redding, CA (96001)");
+    private final JLabel locationSearchStatus = new JLabel("Map centered on Butte County grid center (near Chico)");
     private final GeocodingApiClient geocodingApiClient = new GeocodingApiClient();
     private GeoLocation activeLocation;
     private boolean syncingLocationChoice;
