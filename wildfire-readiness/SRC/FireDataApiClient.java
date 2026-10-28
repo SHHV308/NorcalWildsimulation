@@ -26,8 +26,6 @@ public final class FireDataApiClient {
     private static final String FIRMS_BASE =
             "https://firms.modaps.eosdis.nasa.gov/api/area/csv/";
     private static final String NORTHERN_CALIFORNIA_BOUNDS = "-124,36.5,-119,42";
-    private static final int FIRMS_DAY_RANGE = 2;
-    private static final java.time.Duration FIRMS_MAX_AGE = java.time.Duration.ofHours(24);
     private final HttpClient httpClient;
     private final URI calFireLayerUri;
     private final String firmsMapKey;
@@ -123,29 +121,9 @@ public final class FireDataApiClient {
                 + encodePath(firmsMapKey)
                 + "/VIIRS_SNPP_NRT/"
                 + encodePath(NORTHERN_CALIFORNIA_BOUNDS)
-                + "/" + FIRMS_DAY_RANGE);
+                + "/1");
         String csv = getText(uri, "NASA FIRMS");
-        Instant now = Instant.now();
-        return recentOnly(parseFirmsCsv(csv, now), now, FIRMS_MAX_AGE);
-    }
-
-    /**
-     * Keeps detections acquired within maxAge of now. A day range of 1 only
-     * covers the current UTC calendar day, so late in the California afternoon
-     * it holds just a few hours of data; asking for two days and filtering by
-     * the real acquisition time gives a steady 24-hour window.
-     */
-    static List<ObservedFire> recentOnly(
-            List<ObservedFire> detections, Instant now, java.time.Duration maxAge) {
-        List<ObservedFire> recent = new ArrayList<>();
-        Instant oldest = now.minus(maxAge);
-        for (ObservedFire detection : detections) {
-            Instant observedAt = detection.getObservedAt();
-            if (observedAt == null || !observedAt.isBefore(oldest)) {
-                recent.add(detection);
-            }
-        }
-        return recent;
+        return parseFirmsCsv(csv, Instant.now());
     }
 
     static List<ObservedFire> parseFirmsCsv(String csv, Instant fetchedAt) throws IOException {

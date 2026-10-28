@@ -79,11 +79,6 @@ public final class WeatherMonitor implements AutoCloseable {
             String message = "NWS refresh failed: " + exception.getMessage();
             lastError.set(message);
             System.err.println(message);
-        } catch (RuntimeException exception) {
-            // An uncaught exception would silently stop all future polling.
-            String message = "NWS refresh failed unexpectedly: " + exception;
-            lastError.set(message);
-            System.err.println(message);
         }
     }
 }

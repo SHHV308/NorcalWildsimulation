@@ -105,11 +105,6 @@ public final class WeatherObservation {
     }
 
     public Optional<Wind> toWindToward() {
-        // Calm air: NWS often omits the direction when the speed is zero.
-        if (windSpeedMetersPerSecond != null && windSpeedMetersPerSecond == 0.0
-                && windDirectionFromDegrees == null) {
-            return Optional.of(Wind.calm());
-        }
         if (windSpeedMetersPerSecond == null || windDirectionFromDegrees == null
                 || !Double.isFinite(windSpeedMetersPerSecond)
                 || windSpeedMetersPerSecond < 0.0

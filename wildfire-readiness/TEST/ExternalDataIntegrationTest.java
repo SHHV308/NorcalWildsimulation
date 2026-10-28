@@ -34,6 +34,13 @@ public final class ExternalDataIntegrationTest {
             return;
         }
 
+        FireSimulation csvGrid = Main.loadSimulation();
+        require(csvGrid.getRows() == 20 && csvGrid.getColumns() == 20,
+                "CSV-backed simulation is capped at a 20 x 20 grid");
+        require(csvGrid.getCell(0, 0).getFuelModel() == 102
+                && csvGrid.getCell(19, 19).getFuelModel() == 102,
+                "20 x 20 simulation uses the centered CSV window");
+
         AtomicBoolean failRequests = new AtomicBoolean();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> respond(exchange, failRequests));
@@ -189,9 +196,45 @@ public final class ExternalDataIntegrationTest {
             require(forecast[2][2] == 0.0, "reported fire cell is forecast at time zero");
             require(forecast[2][3] < forecast[2][1],
                     "current wind makes downwind neighbor arrival earlier");
+            double eastNeighborChance = forecastGrid.estimateIgnitionProbability(
+                    2, 3, 2, 2, eastWind, 30.0);
+            double westNeighborChance = forecastGrid.estimateIgnitionProbability(
+                    2, 1, 2, 2, eastWind, 30.0);
+            require(eastNeighborChance > westNeighborChance
+                    && eastNeighborChance > 0.0 && eastNeighborChance < 1.0,
+                    "neighbor ignition chance responds to wind direction");
+            Wind southWind = new Wind(8.0, 180.0);
+            double[][] southForecast = FireSpreadForecaster.estimateArrivalTimes(
+                    forecastGrid, southWind,
+                    java.util.Collections.singletonList(new int[] { 2, 2 }));
+            double southNeighborChance = forecastGrid.estimateIgnitionProbability(
+                    3, 2, 2, 2, southWind, 30.0);
+            double northNeighborChance = forecastGrid.estimateIgnitionProbability(
+                    1, 2, 2, 2, southWind, 30.0);
+            require(southForecast[3][2] < southForecast[1][2]
+                    && southNeighborChance > northNeighborChance,
+                    "north-to-south wind accelerates the south neighbor");
+            try {
+                forecastGrid.estimateIgnitionProbability(
+                        2, 3, 2, 2, eastWind, 0.0);
+                throw new AssertionError("Invalid ignition probability interval was accepted.");
+            } catch (IllegalArgumentException expected) {
+                require(expected.getMessage().contains("interval"),
+                        "invalid neighbor-probability interval is rejected");
+            }
             require(forecastGrid.getCell(2, 2).getState() == FireState.UNBURNED
                     && forecastGrid.getTimeSeconds() == 0.0,
                     "arrival forecast does not ignite cells or advance simulation");
+            FireSimulation blockedGrid = new FireSimulation(
+                    new int[][] { { 1, 1 } },
+                    new int[][] { { 101, 91 } },
+                    30.0,
+                    30.0,
+                    Wind.calm(),
+                    2L);
+            require(blockedGrid.estimateIgnitionProbability(
+                    0, 1, 0, 0, Wind.calm(), 30.0) == 0.0,
+                    "non-burnable neighbor has zero ignition probability");
             double[][] displayForecast = FireSpreadForecaster.summarizeDisplayCells(
                     forecast, 1, 1);
             require(displayForecast.length == 1 && displayForecast[0].length == 1
@@ -204,9 +247,24 @@ public final class ExternalDataIntegrationTest {
             require(simulation.getTimeSeconds() == 0.0, "reset clears simulation time");
             require(simulation.getCell(0, 0).getState() == FireState.BURNING,
                     "reset restores original simulated ignition");
+            simulation.clearFire();
+            require(simulation.getCell(0, 0).getState() == FireState.UNBURNED
+                    && simulation.getTimeSeconds() == 0.0,
+                    "clear fire removes the active ignition and resets the simulation");
 
             FireSimulationGUI gui = new FireSimulationGUI(
                     simulation, null, null, Wind.calm());
+            javax.swing.JButton igniteCellButton = findButton(gui, "Ignite selected cell");
+            require(igniteCellButton != null && igniteCellButton.isEnabled(),
+                    "cell ignition is enabled without a weather observation");
+            igniteCellButton.doClick();
+            require(simulation.getCell(0, 0).getState() == FireState.BURNING,
+                    "cell ignites using the fallback calm wind");
+            javax.swing.JButton clearFireButton = findButton(gui, "Clear fire");
+            require(clearFireButton != null, "clear fire control is available");
+            clearFireButton.doClick();
+            require(simulation.getCell(0, 0).getState() == FireState.UNBURNED,
+                    "clear fire stops and resets a fallback-wind ignition");
             gui.setSize(1200, 780);
             gui.doLayout();
             java.awt.image.BufferedImage image = new java.awt.image.BufferedImage(
@@ -215,12 +273,31 @@ public final class ExternalDataIntegrationTest {
             gui.paint(graphics);
             graphics.dispose();
             require(image.getRGB(0, 0) != 0, "Swing interface paints in headless test");
+            WeatherMonitor gridWeatherMonitor = new WeatherMonitor(
+                    weatherClient, 38.58, -121.49);
+            try {
+                GridCommunicationGUI gridGui = new GridCommunicationGUI(
+                        new GridCellData(50, 50, 2960, 102),
+                        new GridCellData(50, 51, 2960, 102),
+                        gridWeatherMonitor);
+                gridGui.setSize(1100, 760);
+                gridGui.doLayout();
+                java.awt.image.BufferedImage gridImage = new java.awt.image.BufferedImage(
+                        1100, 760, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+                java.awt.Graphics2D gridGraphics = gridImage.createGraphics();
+                gridGui.paint(gridGraphics);
+                gridGraphics.dispose();
+                require(gridImage.getRGB(0, 0) != 0,
+                        "two-cell communication view paints in headless test");
+                require(containsLabel(gridGui, "Immediate Cell-to-Cell Fire Spread"),
+                        "fire-spread view displays the compact cell-to-cell interface");
+            } finally {
+                gridWeatherMonitor.close();
+            }
             require(containsLabel(gui, "Grass / fine fuels"),
                     "selected-cell panel shows an understandable cover class");
             require(!containsLabel(gui, "2966"),
                     "raw vegetation raster code is not shown as the vegetation name");
-            require(containsLabel(gui, "Not provided in sample grid"),
-                    "selected-cell panel does not invent fuel dryness");
             require(FuelCover.descriptionForModel(122).equals("Shrub / brush"),
                     "shrub fuel models receive a human-readable cover name");
             require(FuelCover.descriptionForModel(186).equals("Timber / woody fuels"),
@@ -234,15 +311,14 @@ public final class ExternalDataIntegrationTest {
                     "raw raster code remains available as supporting tooltip detail");
             require(containsLabel(gui, "0, 0"),
                     "selected-cell panel shows the selected cell row and column");
-            require(containsLabel(gui, "40.5862, -122.3914"),
-                    "selected-cell panel shows coordinates at the selected location");
+            require(containsLabel(gui, "CSV FIRE SIMULATION GRID"),
+                    "interface presents the CSV-backed cell grid instead of a map");
             require(containsLabel(gui, "No ETA"),
                     "selected-cell panel explains when no fire ETA is available");
-            javax.swing.JComboBox<?> locationSelector = findComboBox(gui);
-            require(locationSelector != null, "location selector is available");
-            locationSelector.setSelectedIndex(1);
-            require(containsLabel(gui, "38.5816, -121.4944"),
-                    "selected-cell coordinates update when the map location changes");
+            require(findComboBox(gui) == null,
+                    "grid simulation does not show map location controls");
+            require(!containsLabel(gui, "Wind Direction (arrow points toward)"),
+                    "compass and directional arrow are removed from the controls");
 
             failRequests.set(true);
             try {
@@ -369,6 +445,22 @@ public final class ExternalDataIntegrationTest {
             }
             if (component instanceof java.awt.Container) {
                 javax.swing.JLabel match = findLabel((java.awt.Container) component, text);
+                if (match != null) {
+                    return match;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static javax.swing.JButton findButton(java.awt.Container parent, String text) {
+        for (java.awt.Component component : parent.getComponents()) {
+            if (component instanceof javax.swing.JButton
+                    && text.equals(((javax.swing.JButton) component).getText())) {
+                return (javax.swing.JButton) component;
+            }
+            if (component instanceof java.awt.Container) {
+                javax.swing.JButton match = findButton((java.awt.Container) component, text);
                 if (match != null) {
                     return match;
                 }

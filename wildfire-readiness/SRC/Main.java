@@ -1,146 +1,130 @@
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
-import javax.swing.SwingUtilities;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 public class Main {
 
-    private static final int ROWS = 100;
-    private static final int COLS = 100;
     private static final String CSV_FILE =
             "Data/northern_california_100x100_java_grid.csv";
-    private static final double DEFAULT_LATITUDE = 40.5862;
-    private static final double DEFAULT_LONGITUDE = -122.3914;
+    private static final int GRID_DIMENSION = 20;
+    private static final double CELL_SIZE_METERS = 30.0;
+    private static final double TIME_STEP_SECONDS = 30.0;
+    private static final double WEATHER_LATITUDE = 40.5862;
+    private static final double WEATHER_LONGITUDE = -122.3914;
 
     public static void main(String[] args) {
-        int[][] vegetationGrid = new int[ROWS][COLS];
-        int[][] fuelGrid = new int[ROWS][COLS];
-        boolean[][] loaded = new boolean[ROWS][COLS];
-        int cellCount = 0;
-        double latitude = DEFAULT_LATITUDE;
-        double longitude = DEFAULT_LONGITUDE;
-        double fallbackWindSpeed = 0.0;
-        double fallbackWindDirection = 0.0;
-
-        System.out.println("================================");
-        System.out.println("       CALFIRE SIMULATION");
-        System.out.println("================================");
-        System.out.println("Loading Northern California data...");
-
+        if (args.length != 0) {
+            System.err.println("Usage: Main");
+            return;
+        }
         try {
-            int positionalCount = 0;
-            for (int index = 0; index < args.length; index++) {
-                if ("--location".equals(args[index])) {
-                    if (index + 2 >= args.length) {
-                        throw new IllegalArgumentException(
-                                "--location requires latitude and longitude.");
-                    }
-                    latitude = Double.parseDouble(args[++index]);
-                    longitude = Double.parseDouble(args[++index]);
-                } else if ("--wind".equals(args[index])) {
-                    if (index + 2 >= args.length) {
-                        throw new IllegalArgumentException(
-                                "--wind requires fallback speed and direction.");
-                    }
-                    fallbackWindSpeed = Double.parseDouble(args[++index]);
-                    fallbackWindDirection = Double.parseDouble(args[++index]);
-                } else if (positionalCount == 0) {
-                    fallbackWindSpeed = Double.parseDouble(args[index]);
-                    positionalCount++;
-                } else if (positionalCount == 1) {
-                    fallbackWindDirection = Double.parseDouble(args[index]);
-                    positionalCount++;
-                } else {
-                    throw new IllegalArgumentException(
-                            "Usage: Main [fallback-speed] [fallback-direction] "
-                                    + "[--location latitude longitude] "
-                                    + "[--wind speed direction]");
-                }
-            }
-            Wind fallbackWind = new Wind(fallbackWindSpeed, fallbackWindDirection);
-            if (!Double.isFinite(latitude) || latitude < -90.0 || latitude > 90.0
-                    || !Double.isFinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-                throw new IllegalArgumentException("Weather location coordinates are invalid.");
-            }
-
-            try (BufferedReader reader = new BufferedReader(new FileReader(CSV_FILE))) {
-                String header = reader.readLine();
-                if (header == null) {
-                    throw new IOException("CSV file is empty.");
-                }
-
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.trim().isEmpty()) {
-                        continue;
-                    }
-
-                    String[] values = line.split(",", -1);
-                    if (values.length < 6) {
-                        throw new IOException("Invalid CSV row: " + line);
-                    }
-
-                    int row = Integer.parseInt(values[0].trim());
-                    int col = Integer.parseInt(values[1].trim());
-                    int vegetation = Integer.parseInt(values[4].trim());
-                    int fuel = Integer.parseInt(values[5].trim());
-
-                    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) {
-                        throw new IOException(
-                                "Grid position out of bounds: " + row + ", " + col);
-                    }
-                    if (loaded[row][col]) {
-                        throw new IOException("Duplicate grid cell: " + row + ", " + col);
-                    }
-
-                    vegetationGrid[row][col] = vegetation;
-                    fuelGrid[row][col] = fuel;
-                    loaded[row][col] = true;
-                    cellCount++;
-                }
-            }
-
-            System.out.println();
-            System.out.println("CSV loaded successfully!");
-            System.out.println("Total cells: " + cellCount);
-            System.out.println("Grid size: " + ROWS + " x " + COLS);
-            if (cellCount != ROWS * COLS) {
-                System.out.println("WARNING: Some grid cells are missing.");
-            }
-
-            System.out.println();
-            System.out.println("Sample cell [0][0]:");
-            System.out.println("Vegetation code: " + vegetationGrid[0][0]);
-            System.out.println("Fuel model: " + fuelGrid[0][0]);
-
-            FireSimulation simulation = new FireSimulation(
-                    vegetationGrid,
-                    fuelGrid,
-                    30.0,
-                    30.0,
-                    fallbackWind,
-                    20261016L);
-            System.out.println();
-            System.out.println("CALSAFE data initialization complete.");
-            System.out.printf("Configured fallback wind (not used for fire ETAs): "
-                            + "%.1f m/s toward %.0f degrees.%n",
-                    fallbackWindSpeed, simulation.getWind().getDirectionDegrees());
-            System.out.printf(
-                    "NWS weather location: %.4f, %.4f; forecasts use reported fire observations "
-                            + "and fresh station wind.%n",
-                    latitude,
-                    longitude);
-            System.out.println("Opening CALSAFE fire spread forecast...");
+            FireSimulation simulation = loadSimulation();
+            System.out.println("Loaded " + simulation.getRows() + " x "
+                    + simulation.getColumns() + " fuel cells from " + CSV_FILE + ".");
+            System.out.println("Fetching current wind from the nearest NWS station...");
             WeatherMonitor weatherMonitor = new WeatherMonitor(
-                    new WeatherApiClient(), latitude, longitude);
-            FireObservationMonitor fireMonitor =
-                    new FireObservationMonitor(new FireDataApiClient());
-            SwingUtilities.invokeLater(() -> FireSimulationGUI.showSimulation(
-                    simulation, weatherMonitor, fireMonitor, fallbackWind));
-        } catch (IOException | IllegalArgumentException e) {
-            System.err.println("Error loading wildfire data: " + e.getMessage());
-            e.printStackTrace();
+                    new WeatherApiClient(), WEATHER_LATITUDE, WEATHER_LONGITUDE);
+            FireSimulationGUI.showSimulation(
+                    simulation, weatherMonitor, null, simulation.getWind());
+        } catch (IOException | IllegalArgumentException exception) {
+            System.err.println("Unable to start wildfire grid: " + exception.getMessage());
+            exception.printStackTrace();
         }
     }
 
+    static FireSimulation loadSimulation() throws IOException {
+        List<GridCellData> cells = new ArrayList<>();
+        int maximumRow = -1;
+        int maximumColumn = -1;
+        try (BufferedReader reader = new BufferedReader(new FileReader(CSV_FILE))) {
+            String header = reader.readLine();
+            if (!"row,col,X,Y,vegetation_code,fuel_model".equals(header)) {
+                throw new IOException("CSV header does not match the expected grid format.");
+            }
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.trim().isEmpty()) {
+                    continue;
+                }
+                String[] values = line.split(",", -1);
+                if (values.length < 6) {
+                    throw new IOException("Invalid CSV row: " + line);
+                }
+                int row, column, vegetation, fuel;
+                try {
+                    row = Integer.parseInt(values[0].trim());
+                    column = Integer.parseInt(values[1].trim());
+                    vegetation = Integer.parseInt(values[4].trim());
+                    fuel = Integer.parseInt(values[5].trim());
+                } catch (NumberFormatException exception) {
+                    throw new IOException("Invalid CSV cell data: " + line, exception);
+                }
+                if (row < 0 || column < 0) {
+                    throw new IOException("CSV cell coordinates must be non-negative: " + line);
+                }
+                cells.add(new GridCellData(row, column, vegetation, fuel));
+                maximumRow = Math.max(maximumRow, row);
+                maximumColumn = Math.max(maximumColumn, column);
+            }
+        }
+
+        int sourceRows = maximumRow + 1;
+        int sourceColumns = maximumColumn + 1;
+        if (sourceRows < GRID_DIMENSION || sourceColumns < GRID_DIMENSION) {
+            throw new IOException("CSV grid must contain at least "
+                    + GRID_DIMENSION + " rows and columns.");
+        }
+        if ((long) sourceRows * sourceColumns != cells.size()) {
+            throw new IOException("CSV grid contains missing or duplicate cells.");
+        }
+
+        boolean[][] sourcePopulated = new boolean[sourceRows][sourceColumns];
+        for (GridCellData cell : cells) {
+            int row = cell.getRow();
+            int column = cell.getColumn();
+            if (sourcePopulated[row][column]) {
+                throw new IOException("Duplicate CSV cell at row " + row
+                        + ", column " + column + ".");
+            }
+            sourcePopulated[row][column] = true;
+        }
+
+        int sourceStartRow = (sourceRows - GRID_DIMENSION) / 2;
+        int sourceStartColumn = (sourceColumns - GRID_DIMENSION) / 2;
+        int[][] vegetation = new int[GRID_DIMENSION][GRID_DIMENSION];
+        int[][] fuel = new int[GRID_DIMENSION][GRID_DIMENSION];
+        boolean[][] populated = new boolean[GRID_DIMENSION][GRID_DIMENSION];
+        for (int row = 0; row < GRID_DIMENSION; row++) {
+            Arrays.fill(vegetation[row], -1);
+        }
+        for (GridCellData cell : cells) {
+            int row = cell.getRow() - sourceStartRow;
+            int column = cell.getColumn() - sourceStartColumn;
+            if (row < 0 || row >= GRID_DIMENSION
+                    || column < 0 || column >= GRID_DIMENSION) {
+                continue;
+            }
+            if (populated[row][column]) {
+                throw new IOException("Duplicate CSV cell at row " + row
+                        + ", column " + column + ".");
+            }
+            populated[row][column] = true;
+            vegetation[row][column] = cell.getVegetationCode();
+            fuel[row][column] = cell.getFuelModel();
+        }
+        for (int row = 0; row < GRID_DIMENSION; row++) {
+            for (int column = 0; column < GRID_DIMENSION; column++) {
+                if (!populated[row][column]) {
+                    throw new IOException("CSV is missing cell at row "
+                            + (row + sourceStartRow) + ", column "
+                            + (column + sourceStartColumn) + ".");
+                }
+            }
+        }
+        return new FireSimulation(
+                vegetation, fuel, CELL_SIZE_METERS, TIME_STEP_SECONDS, Wind.calm(), 20261026L);
+    }
 }

@@ -169,6 +169,19 @@ public final class FireSimulation {
         }
     }
 
+    public void clearFire() {
+        timeSeconds = 0.0;
+        random = new Random(randomSeed);
+        weatherObservation = null;
+        initialIgnitionRow = -1;
+        initialIgnitionCol = -1;
+        for (FireCell[] row : cells) {
+            for (FireCell cell : row) {
+                cell.reset();
+            }
+        }
+    }
+
     /**
      * Advances one fixed time step. For each eligible target, source-neighbor
      * probabilities are combined as 1 - product(1 - p_i), with
@@ -214,20 +227,14 @@ public final class FireSimulation {
                     FuelProfile profile = profileFor(
                             cells[row][col].getVegetationCode(),
                             cells[row][col].getFuelModel());
-                    ignite(cells[row][col], profile, timeSeconds);
+                    FireCell target = cells[row][col];
+                    ignite(target, profile, timeSeconds);
                 }
             }
         }
     }
 
     private double calculateIgnitionProbability(FireCell target) {
-        FuelProfile targetProfile = profileFor(
-                target.getVegetationCode(),
-                target.getFuelModel());
-        if (targetProfile == null) {
-            return 0.0;
-        }
-
         double probabilityNotIgnited = 1.0;
         for (int rowOffset = -1; rowOffset <= 1; rowOffset++) {
             for (int colOffset = -1; colOffset <= 1; colOffset++) {
@@ -249,19 +256,61 @@ public final class FireSimulation {
                         sourceRow, sourceCol, wind);
 
                 target.setPredictedArrivalTimeSeconds(timeSeconds + travelTimeSeconds);
-                double temporalProbability = 1.0 - Math.exp(-timeStepSeconds / travelTimeSeconds);
-                double sourceIntensityFactor = source.getFirelineIntensityKwPerMeter()
-                        / (source.getFirelineIntensityKwPerMeter() + 100.0);
-                double ignitionProbability = clamp(
-                        targetProfile.ignitionSusceptibility
-                                * temporalProbability
-                                * (0.75 + 0.5 * sourceIntensityFactor),
-                        0.0,
-                        1.0);
+                double ignitionProbability = estimateIgnitionProbability(
+                        target.getRow(), target.getCol(), sourceRow, sourceCol,
+                        wind, timeStepSeconds);
                 probabilityNotIgnited *= 1.0 - ignitionProbability;
             }
         }
         return 1.0 - probabilityNotIgnited;
+    }
+
+    /**
+     * Estimates one neighbor's ignition chance over a time interval. This uses
+     * the same empirical fuel and intensity proxies as the simulation; it is
+     * not a calibrated wildfire prediction.
+     */
+    public double estimateIgnitionProbability(
+            int targetRow,
+            int targetCol,
+            int sourceRow,
+            int sourceCol,
+            Wind forecastWind,
+            double intervalSeconds) {
+        if (!Double.isFinite(intervalSeconds) || intervalSeconds <= 0.0) {
+            throw new IllegalArgumentException("Probability interval must be finite and positive.");
+        }
+        double travelTimeSeconds = estimateTravelTimeSeconds(
+                targetRow, targetCol, sourceRow, sourceCol, forecastWind);
+        if (!Double.isFinite(travelTimeSeconds)) {
+            return 0.0;
+        }
+
+        if (cells[targetRow][targetCol].getState() != FireState.UNBURNED) {
+            return 0.0;
+        }
+        FuelProfile targetProfile = profileFor(
+                cells[targetRow][targetCol].getVegetationCode(),
+                cells[targetRow][targetCol].getFuelModel());
+        FuelProfile sourceProfile = profileFor(
+                cells[sourceRow][sourceCol].getVegetationCode(),
+                cells[sourceRow][sourceCol].getFuelModel());
+        if (targetProfile == null || sourceProfile == null) {
+            return 0.0;
+        }
+
+        FireCell source = cells[sourceRow][sourceCol];
+        double sourceIntensity = source.getState() == FireState.BURNING
+                ? source.getFirelineIntensityKwPerMeter()
+                : estimateFirelineIntensity(sourceProfile, forecastWind);
+        double temporalProbability = 1.0 - Math.exp(-intervalSeconds / travelTimeSeconds);
+        double sourceIntensityFactor = sourceIntensity / (sourceIntensity + 100.0);
+        return clamp(
+                targetProfile.ignitionSusceptibility
+                        * temporalProbability
+                        * (0.75 + 0.5 * sourceIntensityFactor),
+                0.0,
+                1.0);
     }
 
     public double estimateTravelTimeSeconds(
@@ -305,17 +354,26 @@ public final class FireSimulation {
         return distance / spreadRate;
     }
 
-    private void ignite(FireCell cell, FuelProfile profile, double ignitionTimeSeconds) {
+    private void ignite(
+            FireCell cell,
+            FuelProfile profile,
+            double ignitionTimeSeconds) {
         // Empirical rate proxy: R = R0 * (1 + 0.12 * windSpeed); wind direction
         // is applied separately when estimating travel to a particular neighbor.
         double spreadRate = profile.baseSpreadRateMetersPerSecond
                 * (1.0 + WIND_SPREAD_COEFFICIENT * wind.getSpeedMetersPerSecond());
 
         // Byram fireline intensity: I = H * w * R; (kJ/kg)(kg/m^2)(m/s) = kW/m.
-        double intensity = HEAT_OF_COMBUSTION_KJ_PER_KG
+        double intensity = estimateFirelineIntensity(profile, wind);
+        cell.ignite(ignitionTimeSeconds, spreadRate, intensity);
+    }
+
+    private static double estimateFirelineIntensity(FuelProfile profile, Wind forecastWind) {
+        double spreadRate = profile.baseSpreadRateMetersPerSecond
+                * (1.0 + WIND_SPREAD_COEFFICIENT * forecastWind.getSpeedMetersPerSecond());
+        return HEAT_OF_COMBUSTION_KJ_PER_KG
                 * profile.fuelLoadKgPerSquareMeter
                 * spreadRate;
-        cell.ignite(ignitionTimeSeconds, spreadRate, intensity);
     }
 
     private boolean isInsideGrid(int row, int col) {

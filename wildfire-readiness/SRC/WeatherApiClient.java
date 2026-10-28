@@ -11,7 +11,6 @@ import java.util.Map;
 public final class WeatherApiClient {
 
     private static final String USER_AGENT = "CALSAFE-Wildfire-Readiness/1.0";
-    private static final int MAX_STATIONS_TO_TRY = 5;
     private final HttpClient httpClient;
     private final URI baseUri;
 
@@ -44,51 +43,7 @@ public final class WeatherApiClient {
         if (features.isEmpty()) {
             throw new IOException("NWS returned no observation stations for this location.");
         }
-
-        // Try the nearest few stations. Some stations report no wind direction
-        // or have an old reading, so keep going until one is usable.
-        WeatherObservation firstReading = null;
-        IOException lastError = null;
-        int tried = 0;
-        for (Object feature : features) {
-            if (tried >= MAX_STATIONS_TO_TRY) {
-                break;
-            }
-            tried++;
-            try {
-                WeatherObservation observation =
-                        fetchStationObservation(JsonParser.object(feature));
-                if (isUsable(observation)) {
-                    return observation;
-                }
-                if (firstReading == null) {
-                    firstReading = observation;
-                }
-            } catch (IOException exception) {
-                lastError = exception;
-            }
-        }
-        if (firstReading != null) {
-            return firstReading;
-        }
-        if (lastError != null) {
-            throw lastError;
-        }
-        throw new IOException("NWS returned no usable observation for this location.");
-    }
-
-    /** Fresh reading that has a wind speed and either a direction or calm air. */
-    private static boolean isUsable(WeatherObservation observation) {
-        if (!observation.isFreshAt(Instant.now(), WeatherMonitor.MAX_OBSERVATION_AGE)) {
-            return false;
-        }
-        Double speed = observation.getWindSpeedMetersPerSecond();
-        return speed != null
-                && (observation.getWindDirectionFromDegrees() != null || speed == 0.0);
-    }
-
-    private WeatherObservation fetchStationObservation(Map<String, Object> stationFeature)
-            throws IOException, InterruptedException {
+        Map<String, Object> stationFeature = JsonParser.object(features.get(0));
         String stationUrl = JsonParser.string(stationFeature.get("id"));
         Map<String, Object> stationProperties =
                 JsonParser.object(stationFeature.get("properties"));

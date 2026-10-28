@@ -18,12 +18,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.Random;
-import java.util.Set;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -41,8 +39,8 @@ import javax.swing.border.EmptyBorder;
 public class FireSimulationGUI extends JPanel {
 
     private static final long serialVersionUID = 1L;
-    private static final int DISPLAY_GRID_ROWS = 6;
-    private static final int DISPLAY_GRID_COLUMNS = 6;
+    private static final int DISPLAY_GRID_ROWS = 20;
+    private static final int DISPLAY_GRID_COLUMNS = 20;
     private static final Color PANEL = new Color(247, 249, 251);
     private static final Color TEXT = new Color(40, 51, 62);
     private static final Color FOREST = new Color(25, 65, 55);
@@ -53,6 +51,7 @@ public class FireSimulationGUI extends JPanel {
     private final FireSimulation simulation;
     private final FireObservationMonitor fireObservationMonitor;
     private WeatherMonitor weatherMonitor;
+    private final Wind fallbackWind;
     private Wind forecastWind;
     private final JLabel weatherSummary = new JLabel("Waiting for station observation...");
     private final JLabel weatherTimestamp = new JLabel("NWS observation timestamp: pending");
@@ -66,18 +65,17 @@ public class FireSimulationGUI extends JPanel {
     private final JLabel fireStateValue = metricValue("Waiting for reports", "");
     private final JLabel reportedFireValue = metricValue("--", "");
     private final JLabel selectedEtaValue = metricValue("--", "");
-    private final CompassPanel compassPanel = new CompassPanel();
+    private final JLabel selectedAreaEtaValue = metricValue("--", "");
+    private final JLabel neighborEtaValue = metricValue("--", "");
+    private final JLabel neighborChanceValue = metricValue("--", "");
+    private final JLabel fullGridEtaValue = metricValue("--", "");
+    private final JLabel simulatedTimeValue = metricValue("--", "");
+    private final JLabel simulationStatusValue = metricValue("Select a burnable cell", "");
     private final JLabel selectedCoverValue = new JLabel("--");
-    private final JLabel selectedMoistureValue =
-            new JLabel(FuelCover.moistureDescription());
     private final JLabel selectedCoordinateValue = new JLabel("--, --");
-    private final JLabel selectedLocationValue = new JLabel("--, --");
-    private final JLabel selectedFireValue = new JLabel("No reported fire in this area");
-    private final JLabel selectedFireSourceValue = new JLabel("--");
-    private final JLabel selectedFireDetailsValue = new JLabel("--");
-    private final JLabel selectedFireTimeValue = new JLabel("--");
-    private final JButton hypotheticalFireButton =
-            new JButton("Model fire starting at searched location");
+    private final JButton igniteButton = new JButton("Ignite selected cell");
+    private final JButton runPauseButton = new JButton("Run simulation");
+    private final JButton clearSimulationButton = new JButton("Clear fire");
     private final JComboBox<GeoLocation> locationChoice = new JComboBox<>(new GeoLocation[] {
             new GeoLocation("Redding, CA (96001)", 40.5862, -122.3914),
             new GeoLocation("Sacramento, CA (95814)", 38.5816, -121.4944),
@@ -92,8 +90,11 @@ public class FireSimulationGUI extends JPanel {
     private boolean syncingLocationChoice;
     private final SimulationGrid gridPanel;
     private final Timer displayTimer;
+    private final Timer simulationTimer;
     private int selectedRow;
     private int selectedCol;
+    private int simulationSourceRow = -1;
+    private int simulationSourceCol = -1;
 
     public FireSimulationGUI(FireSimulation simulation) {
         this(simulation, null, null, simulation.getWind());
@@ -107,6 +108,8 @@ public class FireSimulationGUI extends JPanel {
         this.simulation = simulation;
         this.weatherMonitor = weatherMonitor;
         this.fireObservationMonitor = fireObservationMonitor;
+        this.fallbackWind = fallbackWind == null ? simulation.getWind() : fallbackWind;
+        this.forecastWind = this.fallbackWind;
         this.activeLocation = locationChoice.getItemAt(0);
         this.selectedRow = simulation.getRows() / 2;
         this.selectedCol = simulation.getColumns() / 2;
@@ -115,16 +118,14 @@ public class FireSimulationGUI extends JPanel {
 
         gridPanel = new SimulationGrid();
         displayTimer = new Timer(5000, event -> updateDisplay());
+        simulationTimer = new Timer(700, event -> advanceSimulation());
         buildLayout();
         bindControls();
         updateDisplay();
     }
 
     private void buildLayout() {
-        JPanel top = new JPanel(new BorderLayout());
-        top.add(new HeaderPanel(), BorderLayout.NORTH);
-        top.add(buildSearchBar(), BorderLayout.SOUTH);
-        add(top, BorderLayout.NORTH);
+        add(new HeaderPanel(), BorderLayout.NORTH);
 
         JPanel dashboard = new JPanel(new GridBagLayout());
         dashboard.setBackground(new Color(247, 246, 241));
@@ -136,14 +137,14 @@ public class FireSimulationGUI extends JPanel {
         column.insets = new java.awt.Insets(0, 0, 0, 10);
 
         column.gridx = 0;
-        column.weightx = 0.28;
+        column.weightx = 0.22;
         dashboard.add(buildLeftPanel(), column);
         column.gridx = 1;
-        column.weightx = 0.52;
+        column.weightx = 0.54;
         column.insets = new java.awt.Insets(0, 0, 0, 10);
-        dashboard.add(buildMapPanel(), column);
+        dashboard.add(buildGridPanel(), column);
         column.gridx = 2;
-        column.weightx = 0.28;
+        column.weightx = 0.24;
         column.insets = new java.awt.Insets(0, 0, 0, 0);
         dashboard.add(buildRightPanel(), column);
 
@@ -226,71 +227,56 @@ public class FireSimulationGUI extends JPanel {
         content.add(Box.createVerticalStrut(3));
         content.add(weatherTimestamp);
         content.add(new javax.swing.JSeparator());
-        content.add(infoText("Spread estimates use the latest observed NWS station wind. "
-                + "No moving simulation is run."));
+        content.add(infoText("Select a cell and ignite it. Wind-adjusted spread runs "
+                + "through the 20 x 20 CSV fuel grid."));
         content.add(Box.createVerticalGlue());
         return content;
     }
 
-    private JPanel buildMapPanel() {
-        JPanel map = new JPanel(new BorderLayout(0, 0));
-        map.setBackground(new Color(103, 127, 88));
-        map.setBorder(BorderFactory.createLineBorder(new Color(212, 214, 205)));
+    private JPanel buildGridPanel() {
+        JPanel grid = new JPanel(new BorderLayout(0, 0));
+        grid.setBackground(new Color(247, 246, 241));
+        grid.setBorder(BorderFactory.createLineBorder(new Color(212, 214, 205)));
         JPanel caption = new JPanel(new BorderLayout());
         caption.setBackground(new Color(248, 248, 243));
         caption.setBorder(new EmptyBorder(9, 12, 9, 12));
-        caption.add(label("NORTHERN CALIFORNIA FIRE MAP", true), BorderLayout.WEST);
-        caption.add(label(DISPLAY_GRID_ROWS + " x " + DISPLAY_GRID_COLUMNS
-                + " forecast tiles  |  " + simulation.getRows() + " x "
-                + simulation.getColumns() + " fuel cells", false),
+        caption.add(label("CSV FIRE SIMULATION GRID", true), BorderLayout.WEST);
+        caption.add(label(simulation.getRows() + " x " + simulation.getColumns()
+                + " cells  |  click to select", false),
                 BorderLayout.EAST);
-        map.add(caption, BorderLayout.NORTH);
-        gridPanel.setPreferredSize(new Dimension(600, 390));
-        map.add(gridPanel, BorderLayout.CENTER);
-        return map;
+        grid.add(caption, BorderLayout.NORTH);
+        gridPanel.setPreferredSize(new Dimension(680, 610));
+        grid.add(gridPanel, BorderLayout.CENTER);
+        return grid;
     }
 
     private JPanel buildRightPanel() {
         JPanel content = panelCard();
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
         content.add(cardHeading("\uD83D\uDD25  Fire Spread ETA"));
-        styleButton(hypotheticalFireButton, GREEN);
-        hypotheticalFireButton.setText("Model fire at searched location");
-        hypotheticalFireButton.addActionListener(event -> {
-            if (gridPanel.hasHypotheticalSource()) {
-                gridPanel.setHypotheticalSource(false);
-                hypotheticalFireButton.setText("Model fire at searched location");
-            } else {
-                gridPanel.setHypotheticalSource(true);
-                hypotheticalFireButton.setText("Clear hypothetical fire");
-            }
-            updateObservations();
-            updateSelectedCell();
-        });
-        content.add(hypotheticalFireButton);
-        content.add(metricRow("", "Reported fires in map", reportedFireValue));
-        content.add(metricRow("", "Selected area's arrival", selectedEtaValue));
+        styleButton(igniteButton, GREEN);
+        igniteButton.addActionListener(event -> igniteSelectedCell());
+        content.add(igniteButton);
+        JPanel simulationControls = new JPanel(new GridLayout(1, 2, 6, 0));
+        simulationControls.setOpaque(false);
+        styleButton(runPauseButton, new Color(52, 79, 109));
+        runPauseButton.addActionListener(event -> toggleSimulation());
+        styleButton(clearSimulationButton, new Color(112, 91, 77));
+        clearSimulationButton.addActionListener(event -> clearSimulation());
+        simulationControls.add(runPauseButton);
+        simulationControls.add(clearSimulationButton);
+        content.add(simulationControls);
+        content.add(simulationStatusValue);
+        content.add(metricRow("", "Simulation time", simulatedTimeValue));
+        content.add(metricRow("", "Nearest neighbor ETA", neighborEtaValue));
+        content.add(metricRow("", "Neighbor chance / 30 sec", neighborChanceValue));
+        content.add(metricRow("", "Last reachable cell ETA", fullGridEtaValue));
+        content.add(metricRow("", "Selected cell ETA", selectedAreaEtaValue));
         content.add(new javax.swing.JSeparator());
-        JLabel windTitle = label("Wind Direction (arrow points toward)", true);
-        windTitle.setBorder(new EmptyBorder(5, 0, 0, 0));
-        content.add(windTitle);
-        content.add(compassPanel);
-        content.add(new javax.swing.JSeparator());
-
-        fireStateValue.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-        fireStateValue.setForeground(FOREST);
-        fireStateValue.setAlignmentX(LEFT_ALIGNMENT);
-        content.add(fireStateValue);
-        observationSummary.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
-        observationSummary.setForeground(new Color(82, 91, 86));
-        observationSummary.setPreferredSize(new Dimension(230, 32));
-        observationSummary.setMaximumSize(new Dimension(Integer.MAX_VALUE, 38));
-        content.add(observationSummary);
-        content.add(infoText("Map tiles show the earliest estimated arrival within each "
-                + "roughly 500 m area. Estimates use the nearest NWS station wind and "
-                + "generalized fuel rates; they are not official forecasts. Cover groups "
-                + "are inferred from fuel models because the raster-code legend is not included. "
-                + "The grid does not contain fuel dryness or moisture."));
+        content.add(infoText("Play advances 30 model seconds about every 0.7 real seconds. "
+                + "Eight-neighbor spread uses observed wind and generalized fuel rates. "
+                + "ETA and chance are estimates, not official forecasts; the CSV has no "
+                + "fuel-moisture data."));
         return content;
     }
 
@@ -301,15 +287,14 @@ public class FireSimulationGUI extends JPanel {
         JPanel legend = panelCard();
         legend.setLayout(new BorderLayout(10, 5));
         legend.add(cardHeading("\u25a7  Cell Status Legend"), BorderLayout.NORTH);
-        JPanel states = new JPanel(new GridLayout(1, 7, 8, 0));
+        JPanel states = new JPanel(new GridLayout(1, 6, 8, 0));
         states.setOpaque(false);
-        states.add(legendItem(new Color(133, 194, 103), "No forecast path"));
+        states.add(legendItem(new Color(129, 180, 91), "Unburned fuel"));
         states.add(legendItem(new Color(255, 194, 64), "ETA 30+ min"));
         states.add(legendItem(new Color(255, 131, 38), "ETA 10-30 min"));
         states.add(legendItem(new Color(232, 54, 49), "ETA under 10 min"));
-        states.add(legendItem(new Color(84, 91, 95), "Non-burnable"));
-        states.add(legendItem(new Color(205, 52, 40), "Reported fire"));
-        states.add(legendItem(new Color(255, 156, 44), "Hypothetical start"));
+        states.add(legendItem(new Color(205, 52, 40), "Burning"));
+        states.add(legendItem(new Color(112, 67, 57), "Burned"));
         legend.add(states, BorderLayout.CENTER);
         footer.add(legend, BorderLayout.CENTER);
         footer.add(buildSelectedCellPanel(), BorderLayout.EAST);
@@ -322,18 +307,12 @@ public class FireSimulationGUI extends JPanel {
         details.setLayout(new BorderLayout(8, 0));
         JLabel title = cardHeading("\u25c6  Selected Cell Details");
         details.add(title, BorderLayout.NORTH);
-        JPanel values = new JPanel(new GridLayout(5, 2, 14, 4));
+        JPanel values = new JPanel(new GridLayout(2, 2, 14, 4));
         values.setOpaque(false);
         values.add(detailItem("Arrival Estimate", cellStateLabel));
         values.add(detailItem("Vegetation / Fuel Cover", selectedCoverValue));
-        values.add(detailItem("Dryness / Moisture", selectedMoistureValue));
         values.add(detailItem("Row, Column", selectedCoordinateValue));
-        values.add(detailItem("Latitude, Longitude", selectedLocationValue));
-        values.add(detailItem("Current Fire(s) Here", selectedFireValue));
         values.add(detailItem("Selected Cell ETA", selectedEtaValue));
-        values.add(detailItem("Fire Source(s)", selectedFireSourceValue));
-        values.add(detailItem("Fire Details", selectedFireDetailsValue));
-        values.add(detailItem("Reported At (UTC)", selectedFireTimeValue));
         details.add(values, BorderLayout.CENTER);
         return details;
     }
@@ -399,6 +378,142 @@ public class FireSimulationGUI extends JPanel {
         });
     }
 
+    private void igniteSelectedCell() {
+        Wind currentWind = getFreshObservedWind();
+        forecastWind = currentWind;
+        simulation.setWind(currentWind);
+        try {
+            simulation.igniteCell(selectedRow, selectedCol);
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            simulationStatusValue.setText(exception.getMessage());
+            return;
+        }
+        simulationSourceRow = selectedRow;
+        simulationSourceCol = selectedCol;
+        gridPanel.refreshForecast(forecastWind);
+        updateSelectedCell();
+        simulationTimer.start();
+        runPauseButton.setText("Pause simulation");
+        simulationStatusValue.setText("Fire started at row " + selectedRow
+                + ", column " + selectedCol);
+        gridPanel.repaint();
+    }
+
+    private void toggleSimulation() {
+        if (simulationTimer.isRunning()) {
+            simulationTimer.stop();
+            runPauseButton.setText("Resume simulation");
+            updateSimulationStatus();
+        } else if (simulationSourceRow < 0) {
+            igniteSelectedCell();
+        } else {
+            simulation.setWind(getFreshObservedWind());
+            simulationTimer.start();
+            runPauseButton.setText("Pause simulation");
+        }
+    }
+
+    private void clearSimulation() {
+        simulationTimer.stop();
+        simulation.clearFire();
+        simulationSourceRow = -1;
+        simulationSourceCol = -1;
+        runPauseButton.setText("Run simulation");
+        runPauseButton.setEnabled(true);
+        gridPanel.refreshForecast(forecastWind);
+        updateDisplay();
+    }
+
+    private void advanceSimulation() {
+        Wind observedWind = getFreshObservedWind();
+        forecastWind = observedWind;
+        simulation.setWind(observedWind);
+        simulation.advanceOneStep();
+        updateSelectedCell();
+        gridPanel.repaint();
+        if (simulation.isComplete()) {
+            simulationTimer.stop();
+            runPauseButton.setText("Run simulation");
+            runPauseButton.setEnabled(false);
+            simulationStatusValue.setText("Fire front stopped; see burned cells and ETA.");
+        }
+    }
+
+    private Wind getFreshObservedWind() {
+        if (weatherMonitor != null) {
+            WeatherObservation observation = weatherMonitor.getLatest();
+            if (observation != null
+                    && simulation.applyWeatherObservation(
+                            observation, Instant.now(), WeatherMonitor.MAX_OBSERVATION_AGE)) {
+                return observation.toWindToward().orElse(fallbackWind);
+            }
+        }
+        return fallbackWind;
+    }
+
+    private void updateSimulationStatus() {
+        if (simulationSourceRow < 0) {
+            simulationStatusValue.setText(forecastWind == null
+                    ? "Waiting for fresh observed wind"
+                    : "Select a burnable cell and ignite it");
+            simulatedTimeValue.setText("--");
+            return;
+        }
+        int burning = 0;
+        int burned = 0;
+        for (int row = 0; row < simulation.getRows(); row++) {
+            for (int column = 0; column < simulation.getColumns(); column++) {
+                FireState state = simulation.getCell(row, column).getState();
+                if (state == FireState.BURNING) {
+                    burning++;
+                } else if (state == FireState.BURNED) {
+                    burned++;
+                }
+            }
+        }
+        simulatedTimeValue.setText(formatEta(simulation.getTimeSeconds()));
+        simulationStatusValue.setText(String.format(
+                Locale.ROOT, "%d burning, %d burned", burning, burned));
+    }
+
+    private void updateSpreadMetrics() {
+        updateSimulationStatus();
+        if (forecastWind == null
+                || simulation.getCell(selectedRow, selectedCol).getState()
+                        == FireState.NON_BURNABLE) {
+            neighborEtaValue.setText("--");
+            neighborChanceValue.setText("--");
+            fullGridEtaValue.setText("--");
+            return;
+        }
+        double nearestNeighborSeconds = Double.POSITIVE_INFINITY;
+        double highestNeighborChance = 0.0;
+        for (int rowOffset = -1; rowOffset <= 1; rowOffset++) {
+            for (int columnOffset = -1; columnOffset <= 1; columnOffset++) {
+                if (rowOffset == 0 && columnOffset == 0) {
+                    continue;
+                }
+                int neighborRow = selectedRow + rowOffset;
+                int neighborColumn = selectedCol + columnOffset;
+                if (neighborRow < 0 || neighborRow >= simulation.getRows()
+                        || neighborColumn < 0 || neighborColumn >= simulation.getColumns()) {
+                    continue;
+                }
+                double travelSeconds = simulation.estimateTravelTimeSeconds(
+                        neighborRow, neighborColumn, selectedRow, selectedCol, forecastWind);
+                nearestNeighborSeconds = Math.min(nearestNeighborSeconds, travelSeconds);
+                highestNeighborChance = Math.max(highestNeighborChance,
+                        simulation.estimateIgnitionProbability(
+                                neighborRow, neighborColumn, selectedRow, selectedCol,
+                                forecastWind, simulation.getTimeStepSeconds()));
+            }
+        }
+        neighborEtaValue.setText(formatEtaOrNone(nearestNeighborSeconds));
+        neighborChanceValue.setText(String.format(
+                Locale.ROOT, "%.1f%% per step", highestNeighborChance * 100.0));
+        fullGridEtaValue.setText(formatEtaOrNone(gridPanel.getFullGridArrivalTime()));
+    }
+
     private void searchLocation() {
         String query = locationSearchField.getText();
         if (query == null || query.trim().isEmpty()) {
@@ -443,11 +558,18 @@ public class FireSimulationGUI extends JPanel {
         } finally {
             syncingLocationChoice = false;
         }
-        gridPanel.setHypotheticalSource(false);
-        hypotheticalFireButton.setText("Model fire at searched location");
+        if (simulationTimer.isRunning()) {
+            simulationTimer.stop();
+        }
+        simulation.clearFire();
+        simulationSourceRow = -1;
+        simulationSourceCol = -1;
+        runPauseButton.setText("Run simulation");
+        simulationStatusValue.setText("Select a burnable cell");
         gridPanel.setMapCenter(location);
         locationSearchStatus.setText("<html>Map centered on "
                 + escape(location.getDisplayName()) + "</html>");
+        runPauseButton.setEnabled(true);
         if (weatherMonitor != null) {
             weatherMonitor.setLocation(location.getLatitude(), location.getLongitude());
             weatherSummary.setText("Requesting NWS observation near "
@@ -460,32 +582,53 @@ public class FireSimulationGUI extends JPanel {
 
     private void updateDisplay() {
         updateWeatherDisplay();
-        updateObservations();
+        gridPanel.refreshForecast(forecastWind);
         updateSelectedCell();
         gridPanel.repaint();
     }
 
     private void updateWeatherDisplay() {
-        forecastWind = null;
         WeatherObservation observation = weatherMonitor == null
                 ? null : weatherMonitor.getLatest();
         if (observation == null
                 || !observation.isFreshAt(Instant.now(), WeatherMonitor.MAX_OBSERVATION_AGE)) {
+            forecastWind = fallbackWind;
             weatherSpeedValue.setText("-- mph");
             weatherDirectionValue.setText("--");
             weatherTemperatureValue.setText("-- \u00b0F");
             weatherHumidityValue.setText("-- %");
             weatherUpdatedValue.setText("Last updated: --");
             weatherSummary.setText(weatherMonitor == null
-                    ? "Weather service unavailable."
-                    : "Waiting for current NWS station observation...");
+                    ? "Using simulation wind; connect to NWS for current conditions."
+                    : "Waiting for a fresh NWS observation; using simulation wind.");
             String error = weatherMonitor == null ? null : weatherMonitor.getLastError();
-            weatherTimestamp.setText(error == null ? "Fresh observed wind required for ETA."
-                    : "NWS error: " + error);
-            compassPanel.setDirection(0.0);
+            weatherTimestamp.setText(error == null
+                    ? "Simulation wind remains in use."
+                    : "NWS request failed: " + error + " Using simulation wind.");
+            igniteButton.setEnabled(simulationSourceRow < 0
+                    && simulation.getCell(selectedRow, selectedCol).getState()
+                            == FireState.UNBURNED);
             return;
         }
-        forecastWind = observation.toWindToward().orElse(null);
+        if (!simulation.applyWeatherObservation(
+                observation, Instant.now(), WeatherMonitor.MAX_OBSERVATION_AGE)) {
+            forecastWind = fallbackWind;
+            weatherSpeedValue.setText("-- mph");
+            weatherDirectionValue.setText("--");
+            weatherTemperatureValue.setText("-- \u00b0F");
+            weatherHumidityValue.setText("-- %");
+            weatherUpdatedValue.setText(UTC_FORMAT.format(observation.getObservedAt()));
+            weatherSummary.setText("NWS observation has no usable wind speed or direction.");
+            weatherTimestamp.setText("Using simulation wind because observed wind is unavailable.");
+            igniteButton.setEnabled(simulationSourceRow < 0
+                    && simulation.getCell(selectedRow, selectedCol).getState()
+                            == FireState.UNBURNED);
+            return;
+        }
+        forecastWind = observation.toWindToward().get();
+        igniteButton.setEnabled(simulationSourceRow < 0
+                && simulation.getCell(selectedRow, selectedCol).getState()
+                        == FireState.UNBURNED);
         weatherSpeedValue.setText(observation.getWindSpeedMetersPerSecond() == null
                 ? "-- mph"
                 : String.format(Locale.ROOT, "%.1f mph",
@@ -493,7 +636,6 @@ public class FireSimulationGUI extends JPanel {
         Double windFrom = observation.getWindDirectionFromDegrees();
         weatherDirectionValue.setText(windFrom == null
                 ? "--" : formatWindFrom(windFrom));
-        compassPanel.setDirection(windFrom == null ? 0.0 : windFrom + 180.0);
         Double temperatureF = observation.getTemperatureCelsius() == null
                 ? null : observation.getTemperatureCelsius() * 9.0 / 5.0 + 32.0;
         weatherTemperatureValue.setText(temperatureF == null ? "-- \u00b0F"
@@ -513,6 +655,9 @@ public class FireSimulationGUI extends JPanel {
 
     private void updateSelectedCell() {
         FireCell cell = simulation.getCell(selectedRow, selectedCol);
+        igniteButton.setEnabled(forecastWind != null
+                && simulationSourceRow < 0
+                && cell.getState() == FireState.UNBURNED);
         double cellEta = gridPanel.getSelectedArrivalTime(selectedRow, selectedCol);
         double areaEta = gridPanel.getDisplayArrivalTime(selectedRow, selectedCol);
         cellStateLabel.setText(formatEtaOrNone(areaEta));
@@ -520,6 +665,8 @@ public class FireSimulationGUI extends JPanel {
         cellStateLabel.setBackground(Double.isFinite(areaEta)
                 ? new Color(255, 229, 190) : new Color(226, 241, 216));
         selectedEtaValue.setText(formatEtaOrNone(cellEta));
+        selectedAreaEtaValue.setText(formatEtaOrNone(areaEta));
+        updateSpreadMetrics();
         String coverDescription = FuelCover.descriptionForModel(cell.getFuelModel());
         selectedCoverValue.setText(coverDescription);
         selectedCoverValue.setToolTipText("<html>Approximate cover class from fuel model "
@@ -527,81 +674,15 @@ public class FireSimulationGUI extends JPanel {
                 + cell.getVegetationCode()
                 + " has no bundled name legend. This class is not a plant-species "
                 + "identification.</html>");
-        selectedMoistureValue.setText(FuelCover.moistureDescription());
-        selectedMoistureValue.setToolTipText(
-                "The sample data contains no live/dead fuel moisture or dryness measurement.");
         selectedCoordinateValue.setText(selectedRow + ", " + selectedCol);
-        double latitude = activeLocation.getLatitude()
-                + ((simulation.getRows() / 2.0 - selectedRow - 0.5)
-                        * simulation.getCellSizeMeters())
-                        / 111_320.0;
-        double longitude = activeLocation.getLongitude()
-                + ((selectedCol - simulation.getColumns() / 2.0 + 0.5)
-                        * simulation.getCellSizeMeters())
-                        / (111_320.0 * Math.cos(Math.toRadians(activeLocation.getLatitude())));
-        selectedLocationValue.setText(String.format(Locale.ROOT, "%.4f, %.4f", latitude, longitude));
-        List<ObservedFire> firesHere = gridPanel.getFiresAtCell(selectedRow, selectedCol);
-        if (firesHere.isEmpty()) {
-            if (gridPanel.isHypotheticalCell(selectedRow, selectedCol)) {
-                selectedFireValue.setText("Hypothetical ignition");
-                selectedFireSourceValue.setText("User scenario");
-                selectedFireDetailsValue.setText("Not an active fire");
-                selectedFireTimeValue.setText("Not reported");
-            } else {
-                selectedFireValue.setText("None reported");
-                selectedFireSourceValue.setText("--");
-                selectedFireDetailsValue.setText("--");
-                selectedFireTimeValue.setText("--");
-            }
-            selectedFireValue.setToolTipText(null);
-            selectedFireSourceValue.setToolTipText(null);
-            selectedFireDetailsValue.setToolTipText(null);
-            selectedFireTimeValue.setToolTipText(null);
-        } else {
-            List<String> fireNames = new ArrayList<>();
-            List<String> fireSources = new ArrayList<>();
-            for (ObservedFire fire : firesHere) {
-                fireNames.add(fire.getName());
-                String source = fire.getSource() == ObservedFire.Source.CAL_FIRE_INCIDENT
-                        ? "CAL FIRE" : "NASA FIRMS";
-                if (!fireSources.contains(source)) {
-                    fireSources.add(source);
-                }
-            }
-            String names = String.join(", ", fireNames);
-            String sources = String.join(", ", fireSources);
-            selectedFireValue.setText(ellipsize(names, 28));
-            selectedFireSourceValue.setText(sources);
-            ObservedFire latestFire = firesHere.get(0);
-            for (ObservedFire fire : firesHere) {
-                if (fire.getObservedAt() != null
-                        && (latestFire.getObservedAt() == null
-                                || fire.getObservedAt().isAfter(latestFire.getObservedAt()))) {
-                    latestFire = fire;
-                }
-            }
-            String fireDetails = latestFire.getDetails() == null
-                    || latestFire.getDetails().isEmpty() ? "No extra details"
-                            : latestFire.getDetails();
-            selectedFireDetailsValue.setText(ellipsize(fireDetails, 30));
-            selectedFireTimeValue.setText(latestFire.getObservedAt() == null
-                    ? "Time unavailable" : UTC_FORMAT.format(latestFire.getObservedAt()));
-            selectedFireValue.setToolTipText(names);
-            selectedFireSourceValue.setToolTipText(sources);
-            selectedFireDetailsValue.setToolTipText(fireDetails);
-            selectedFireTimeValue.setToolTipText(latestFire.getObservedAt() == null
-                    ? "Observation time unavailable"
-                    : UTC_FORMAT.format(latestFire.getObservedAt()));
-        }
     }
 
     private void updateObservations() {
         if (fireObservationMonitor == null) {
             observationSummary.setText("Fire observation feeds are not connected.");
             gridPanel.setReportedFires(java.util.Collections.emptyList(), forecastWind);
-            fireStateValue.setText(gridPanel.hasHypotheticalSource()
-                    ? "Hypothetical fire location selected"
-                    : "No fire feed connected");
+            reportedFireValue.setText("0");
+            updateSimulationStatus();
             return;
         }
         ObservationFeed calFire = fireObservationMonitor.getCalFireFeed();
@@ -614,11 +695,11 @@ public class FireSimulationGUI extends JPanel {
         if (forecastWind == null) {
             fireStateValue.setText("Waiting for fresh NWS wind");
             selectedEtaValue.setText("--");
-        } else if (mappedFireCount == 0 && !gridPanel.hasHypotheticalSource()) {
+        } else if (mappedFireCount == 0 && simulationSourceRow < 0) {
             fireStateValue.setText("No reported fire in map window");
             selectedEtaValue.setText("--");
-        } else if (gridPanel.hasHypotheticalSource()) {
-            fireStateValue.setText("Hypothetical origin at searched location");
+        } else if (simulationSourceRow >= 0) {
+            fireStateValue.setText("Wind-adjusted ETA from simulated ignition");
         } else {
             fireStateValue.setText("ETA from reported fire(s) using current wind");
         }
@@ -628,6 +709,7 @@ public class FireSimulationGUI extends JPanel {
         observationSummary.setToolTipText("<html><b>CAL FIRE:</b> "
                 + feedSummary(calFire) + "<br><b>NASA FIRMS:</b> "
                 + feedSummary(firms) + "</html>");
+        updateSimulationStatus();
     }
 
     private String compactFeedSummary(ObservationFeed feed) {
@@ -784,7 +866,7 @@ public class FireSimulationGUI extends JPanel {
             WeatherMonitor weatherMonitor,
             FireObservationMonitor fireObservationMonitor,
             Wind fallbackWind) {
-        JFrame frame = new JFrame("Northern California Wildfire Simulator");
+        JFrame frame = new JFrame("CSV Grid Wildfire Simulator");
         frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
         FireSimulationGUI panel = new FireSimulationGUI(
                 simulation, weatherMonitor, fireObservationMonitor, fallbackWind);
@@ -796,10 +878,7 @@ public class FireSimulationGUI extends JPanel {
             @Override
             public void windowClosed(WindowEvent event) {
                 panel.displayTimer.stop();
-                if (panel.gridPanel.basemapWorker != null) {
-                    panel.gridPanel.basemapWorker.cancel(true);
-                    panel.gridPanel.basemapRequest++;
-                }
+                panel.simulationTimer.stop();
                 if (weatherMonitor != null) {
                     weatherMonitor.close();
                 }
@@ -809,7 +888,6 @@ public class FireSimulationGUI extends JPanel {
             }
         });
         frame.setVisible(true);
-        panel.gridPanel.loadBasemap();
         panel.displayTimer.start();
     }
 
@@ -878,54 +956,6 @@ public class FireSimulationGUI extends JPanel {
         }
     }
 
-    private final class CompassPanel extends JPanel {
-
-        private static final long serialVersionUID = 1L;
-        private double directionDegrees;
-
-        private CompassPanel() {
-            setOpaque(false);
-            setPreferredSize(new Dimension(170, 112));
-        }
-
-        private void setDirection(double degrees) {
-            directionDegrees = Double.isFinite(degrees) ? degrees : 0.0;
-            repaint();
-        }
-
-        @Override
-        protected void paintComponent(Graphics graphics) {
-            super.paintComponent(graphics);
-            Graphics2D g = (Graphics2D) graphics.create();
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int centerX = getWidth() / 2;
-            int centerY = getHeight() / 2 + 1;
-            int radius = Math.min(37, Math.min(getWidth() / 2 - 18, getHeight() / 2 - 10));
-            g.setColor(new Color(116, 162, 143));
-            g.setStroke(new BasicStroke(1.3f));
-            g.drawOval(centerX - radius, centerY - radius, radius * 2, radius * 2);
-            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
-            g.setColor(TEXT);
-            g.drawString("N", centerX - 4, centerY - radius - 6);
-            g.drawString("S", centerX - 4, centerY + radius + 15);
-            g.drawString("W", centerX - radius - 15, centerY + 4);
-            g.drawString("E", centerX + radius + 7, centerY + 4);
-
-            Graphics2D arrow = (Graphics2D) g.create();
-            arrow.rotate(Math.toRadians(directionDegrees), centerX, centerY);
-            Path2D pointer = new Path2D.Double();
-            pointer.moveTo(centerX, centerY - radius * 0.72);
-            pointer.lineTo(centerX + 8, centerY + radius * 0.45);
-            pointer.lineTo(centerX, centerY + radius * 0.19);
-            pointer.lineTo(centerX - 8, centerY + radius * 0.45);
-            pointer.closePath();
-            arrow.setColor(GREEN);
-            arrow.fill(pointer);
-            arrow.dispose();
-            g.dispose();
-        }
-    }
-
     private final class SimulationGrid extends JPanel {
 
         private static final long serialVersionUID = 1L;
@@ -939,9 +969,7 @@ public class FireSimulationGUI extends JPanel {
         private SwingWorker<java.awt.image.BufferedImage, Void> basemapWorker;
         private int basemapRequest;
         private Map<Integer, List<ObservedFire>> observedFireCells = new HashMap<>();
-        private final Set<Integer> hypotheticalSourceTiles = new HashSet<>();
         private List<ObservedFire> observedFires = java.util.Collections.emptyList();
-        private boolean hypotheticalSource;
         private double[][] arrivalTimes = new double[0][0];
         private double[][] displayArrivalTimes =
                 new double[DISPLAY_GRID_ROWS][DISPLAY_GRID_COLUMNS];
@@ -1001,7 +1029,6 @@ public class FireSimulationGUI extends JPanel {
         private int setReportedFires(List<ObservedFire> observations, Wind wind) {
             observedFires = new ArrayList<>(observations);
             observedFireCells.clear();
-            hypotheticalSourceTiles.clear();
             List<int[]> sourceCells = new ArrayList<>();
             int mappedCount = 0;
             for (ObservedFire fire : observations) {
@@ -1022,17 +1049,34 @@ public class FireSimulationGUI extends JPanel {
                     observedFireCells.computeIfAbsent(index, key -> new ArrayList<>()).add(fire);
                 }
             }
-            if (hypotheticalSource) {
-                int row = simulation.getRows() / 2;
-                int column = simulation.getColumns() / 2;
-                sourceCells.add(new int[] { row, column });
-                int displayRow = Math.min(DISPLAY_GRID_ROWS - 1,
-                        row * DISPLAY_GRID_ROWS / simulation.getRows());
-                int displayColumn = Math.min(DISPLAY_GRID_COLUMNS - 1,
-                        column * DISPLAY_GRID_COLUMNS / simulation.getColumns());
-                hypotheticalSourceTiles.add(
-                        displayRow * DISPLAY_GRID_COLUMNS + displayColumn);
+            if (simulationSourceRow >= 0) {
+                sourceCells.add(new int[] { simulationSourceRow, simulationSourceCol });
             }
+            calculateArrivalTimes(wind, sourceCells);
+            repaint();
+            return mappedCount;
+        }
+
+        private void refreshForecast(Wind wind) {
+            List<int[]> sourceCells = new ArrayList<>();
+            for (ObservedFire fire : observedFires) {
+                int[] cell = FireGridMapper.toCell(
+                        mapCenter,
+                        fire,
+                        simulation.getRows(),
+                        simulation.getColumns(),
+                        simulation.getCellSizeMeters());
+                if (cell != null) {
+                    sourceCells.add(cell);
+                }
+            }
+            if (simulationSourceRow >= 0) {
+                sourceCells.add(new int[] { simulationSourceRow, simulationSourceCol });
+            }
+            calculateArrivalTimes(wind, sourceCells);
+        }
+
+        private void calculateArrivalTimes(Wind wind, List<int[]> sourceCells) {
             if (wind == null || sourceCells.isEmpty()) {
                 arrivalTimes = new double[simulation.getRows()][simulation.getColumns()];
                 for (double[] row : arrivalTimes) {
@@ -1049,25 +1093,6 @@ public class FireSimulationGUI extends JPanel {
                         arrivalTimes, DISPLAY_GRID_ROWS, DISPLAY_GRID_COLUMNS);
             }
             repaint();
-            return mappedCount;
-        }
-
-        private void setHypotheticalSource(boolean enabled) {
-            hypotheticalSource = enabled;
-            setReportedFires(observedFires, forecastWind);
-        }
-
-        private boolean hasHypotheticalSource() {
-            return hypotheticalSource;
-        }
-
-        private boolean isHypotheticalCell(int row, int column) {
-            int displayRow = Math.min(DISPLAY_GRID_ROWS - 1,
-                    row * DISPLAY_GRID_ROWS / simulation.getRows());
-            int displayColumn = Math.min(DISPLAY_GRID_COLUMNS - 1,
-                    column * DISPLAY_GRID_COLUMNS / simulation.getColumns());
-            return hypotheticalSourceTiles.contains(
-                    displayRow * DISPLAY_GRID_COLUMNS + displayColumn);
         }
 
         private double getSelectedArrivalTime(int row, int column) {
@@ -1092,6 +1117,20 @@ public class FireSimulationGUI extends JPanel {
             return displayArrivalTimes[displayRow][displayColumn];
         }
 
+        private double getFullGridArrivalTime() {
+            double latestArrival = Double.NEGATIVE_INFINITY;
+            for (int row = 0; row < simulation.getRows(); row++) {
+                for (int column = 0; column < simulation.getColumns(); column++) {
+                    if (simulation.getCell(row, column).getState() != FireState.NON_BURNABLE
+                            && Double.isFinite(arrivalTimes[row][column])) {
+                        latestArrival = Math.max(latestArrival, arrivalTimes[row][column]);
+                    }
+                }
+            }
+            return latestArrival == Double.NEGATIVE_INFINITY
+                    ? Double.POSITIVE_INFINITY : latestArrival;
+        }
+
         private List<ObservedFire> getFiresAtCell(int row, int column) {
             int displayRow = Math.min(DISPLAY_GRID_ROWS - 1,
                     row * DISPLAY_GRID_ROWS / simulation.getRows());
@@ -1103,7 +1142,7 @@ public class FireSimulationGUI extends JPanel {
         }
 
         private SimulationGrid() {
-            setBackground(new Color(57, 73, 68));
+            setBackground(new Color(245, 245, 240));
             setPreferredSize(new Dimension(680, 620));
             for (double[] row : displayArrivalTimes) {
                 java.util.Arrays.fill(row, Double.POSITIVE_INFINITY);
@@ -1139,22 +1178,22 @@ public class FireSimulationGUI extends JPanel {
             }
             List<ObservedFire> fires =
                     observedFireCells.get(row * DISPLAY_GRID_COLUMNS + col);
-            int tileIndex = row * DISPLAY_GRID_COLUMNS + col;
             double eta = displayArrivalTimes[row][col];
-            if (hypotheticalSourceTiles.contains(tileIndex)) {
-                return "Hypothetical ignition at searched location; "
-                        + (Double.isFinite(eta) ? formatEta(eta) : "waiting for observed wind");
-            }
+            FireCell cell = simulation.getCell(simulationRow(row), simulationColumn(col));
+            String details = "Cell " + cell.getRow() + ", " + cell.getCol()
+                    + " | " + cell.getState()
+                    + " | ETA " + formatEtaOrNone(eta)
+                    + " | next-step chance "
+                    + String.format(Locale.ROOT, "%.1f%%",
+                            cell.getIgnitionProbability() * 100.0);
             if (fires == null || fires.isEmpty()) {
-                return Double.isFinite(eta) ? "Estimated arrival: " + formatEta(eta)
-                        : "No reported fire path to this cell.";
+                return details;
             }
             List<String> names = new ArrayList<>();
             for (ObservedFire fire : fires) {
                 names.add(fire.getName());
             }
-            return "Reported fire: " + String.join(", ", names)
-                    + "; forecast starts here (0 min).";
+            return details + " | reported: " + String.join(", ", names);
         }
 
         @Override
@@ -1162,11 +1201,9 @@ public class FireSimulationGUI extends JPanel {
             super.paintComponent(graphics);
             Graphics2D g = (Graphics2D) graphics.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            paintTerrain(g, getWidth(), getHeight());
-            int gridSize = Math.max(1, Math.min(
-                    Math.min((getWidth() * 68 / 100), (getHeight() * 88 / 100)), 520));
-            cellSize = Math.max(2, gridSize
-                    / Math.max(DISPLAY_GRID_ROWS, DISPLAY_GRID_COLUMNS));
+            int gridSize = Math.max(1, Math.min(getWidth() - 48, getHeight() - 48));
+            cellSize = gridSize
+                    / Math.max(DISPLAY_GRID_ROWS, DISPLAY_GRID_COLUMNS);
             int gridWidth = cellSize * DISPLAY_GRID_COLUMNS;
             int gridHeight = cellSize * DISPLAY_GRID_ROWS;
             gridX = (getWidth() - gridWidth) / 2;
@@ -1186,16 +1223,8 @@ public class FireSimulationGUI extends JPanel {
                     g.fillRect(x, y, cellSize, cellSize);
                     g.setColor(new Color(12, 24, 20, 170));
                     g.drawRect(x, y, cellSize, cellSize);
-                    List<ObservedFire> fires = observedFireCells.get(
-                            row * DISPLAY_GRID_COLUMNS + col);
-                    int tileIndex = row * DISPLAY_GRID_COLUMNS + col;
-                    if (fires != null) {
+                    if (cell.getState() == FireState.BURNING) {
                         drawObservedFireMarker(g, x, y, cellSize);
-                        if (hypotheticalSourceTiles.contains(tileIndex)) {
-                            drawHypotheticalFireMarker(g, x, y, cellSize);
-                        }
-                    } else if (hypotheticalSourceTiles.contains(tileIndex)) {
-                        drawHypotheticalFireMarker(g, x, y, cellSize);
                     } else if (Double.isFinite(eta)) {
                         g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
                         g.setColor(new Color(30, 32, 29));
@@ -1218,19 +1247,6 @@ public class FireSimulationGUI extends JPanel {
             g.setStroke(new BasicStroke(2.0f));
             g.drawRect(selectedX, selectedY, cellSize, cellSize);
 
-            g.setColor(new Color(255, 255, 255, 225));
-            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 17));
-            g.drawString("\u2191 N", gridX + gridWidth - 35, Math.max(20, gridY - 17));
-            g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-            g.setColor(Color.WHITE);
-            g.drawString(activeLocation.getDisplayName()
-                            + "  |  " + (int) simulation.getCellSizeMeters() + " m cells",
-                    12, getHeight() - 12);
-            String mapCredit = basemapImage != null
-                    ? "Imagery: Esri, Maxar, Earthstar Geographics"
-                    : basemapError == null ? "Terrain preview" : "Basemap unavailable: "
-                            + basemapError;
-            g.drawString(mapCredit, Math.max(12, getWidth() - 290), getHeight() - 12);
             g.dispose();
         }
 
@@ -1357,20 +1373,13 @@ public class FireSimulationGUI extends JPanel {
                     markerSize * 0.32, markerSize * 0.36));
         }
 
-        private void drawHypotheticalFireMarker(Graphics2D graphics, int cellX, int cellY, int size) {
-            int markerSize = Math.max(12, Math.min(18, size / 2));
-            int x = cellX + size - markerSize - 2;
-            int y = cellY + 2;
-            graphics.setColor(new Color(255, 250, 231));
-            graphics.fill(new Ellipse2D.Double(x - 1, y - 1, markerSize + 2, markerSize + 2));
-            graphics.setColor(new Color(230, 117, 26));
-            graphics.fill(new Ellipse2D.Double(x, y, markerSize, markerSize));
-            graphics.setColor(Color.WHITE);
-            graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 10));
-            graphics.drawString("H", x + markerSize / 2 - 3, y + markerSize / 2 + 4);
-        }
-
         private Color forecastColor(double eta, FireCell cell) {
+            if (cell.getState() == FireState.BURNING) {
+                return new Color(205, 52, 40);
+            }
+            if (cell.getState() == FireState.BURNED) {
+                return new Color(112, 67, 57);
+            }
             if (Double.isFinite(eta)) {
                 if (eta < 10.0 * 60.0) {
                     return new Color(232, 72, 56);
@@ -1383,7 +1392,7 @@ public class FireSimulationGUI extends JPanel {
             if (cell.getState() == FireState.NON_BURNABLE) {
                 return new Color(84, 91, 95);
             }
-            return new Color(133, 194, 103);
+            return fuelColor(cell.getFuelModel());
         }
 
         private String shortEta(double seconds) {
