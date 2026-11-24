@@ -1,15 +1,11 @@
 package wildfire;
 
-import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
-import java.awt.Graphics;
-import java.awt.Graphics2D;
 import java.awt.GridLayout;
-import java.awt.RenderingHints;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -27,16 +23,13 @@ import javax.swing.JSlider;
 import javax.swing.JSpinner;
 import javax.swing.JTextArea;
 import javax.swing.SpinnerNumberModel;
-import javax.swing.JDialog;
 import javax.swing.SwingUtilities;
-import javax.swing.SwingWorker;
 import javax.swing.Timer;
 
 /** Swing front end. Holds no simulation rules; it forwards user actions to the controller. */
 public class SimulationGUI extends JFrame {
 
     private static final int MAX_GUI_DIMENSION = Grid.MAX_DIMENSION;
-    private static final int MAX_LOGGED_TESTS_PER_STEP = 40;
 
     private final SimulationController controller;
     private final GridPanel gridPanel;
@@ -48,8 +41,13 @@ public class SimulationGUI extends JFrame {
     private final JRadioButton manualFuelMode = new JRadioButton("Manual");
     private final JComboBox<MaterialType> materialCombo = new JComboBox<>(MaterialType.values());
     private final JButton rerollFuelButton = new JButton("Re-roll random fuel");
-    private final JRadioButton clickIgnition = new JRadioButton("Click toggles ignition point", true);
-    private final JRadioButton clickPaint = new JRadioButton("Click paints material");
+    /** Single source of truth for what a grid click does (paint XOR toggle ignition XOR inspect). */
+    private final GridClickMode clickMode = new GridClickMode();
+    private final JRadioButton paintMaterialAction = new JRadioButton("Paint material (click a cell)");
+    private final JRadioButton toggleIgnitionAction = new JRadioButton("Toggle ignition point (click a cell)");
+    /** Groups the two grid actions so only one can ever be selected. */
+    private final ButtonGroup gridActionGroup = new ButtonGroup();
+    private final JPanel manualFuelPanel = new JPanel();
     private final JRadioButton randomIgnitionMode = new JRadioButton("Random placement");
     private final JRadioButton manualIgnitionMode = new JRadioButton("Manual (click cells)", true);
     private final JSpinner fireCountSpinner = new JSpinner(new SpinnerNumberModel(1, 1, 100, 1));
@@ -62,7 +60,6 @@ public class SimulationGUI extends JFrame {
     private final JLabel windLabel = new JLabel();
     private final JLabel beaufortLabel = new JLabel();
     private final JTextArea timingReport = new JTextArea(8, 60);
-    private final WindIndicator windIndicator = new WindIndicator();
     /** Delay between automatic steps, in ms: 0.1 s (fast) to 5 s (very slow); default 1.5 s. */
     private final JSlider speedSlider = new JSlider(100, 5000, 1500);
     private final JLabel speedLabel = new JLabel();
@@ -71,15 +68,12 @@ public class SimulationGUI extends JFrame {
     private final JButton pauseButton = new JButton("Pause");
     private final JButton resumeButton = new JButton("Resume");
     private final JButton stepButton = new JButton("Step");
+    private final JButton stopButton = new JButton("Stop");
     private final JButton resetButton = new JButton("Reset");
     private final JButton generateButton = new JButton("New grid");
-    private final JButton experimentButton = new JButton("Run experiment...");
 
     private final JLabel[] statLabels = new JLabel[10];
     private final JTextArea cellInfo = new JTextArea(22, 50);
-    private final JTextArea stepLog = new JTextArea(8, 60);
-    private final java.util.Deque<String> stepLogEntries = new java.util.ArrayDeque<>();
-    private int lastLoggedStep = -1;
     private final JCheckBox showSignalsBox = new JCheckBox("Signal arrows (burning -> neighbour)", true);
     private final JCheckBox showProbabilityBox = new JCheckBox("P(ignite) on each cell", true);
     private final JCheckBox showSpreadPathBox = new JCheckBox("Spread path + travel time (steps)", false);
@@ -109,12 +103,9 @@ public class SimulationGUI extends JFrame {
         center.add(gridPanel);
         JPanel middle = new JPanel(new BorderLayout(0, 6));
         middle.add(new JScrollPane(center), BorderLayout.CENTER);
-        stepLog.setEditable(false);
-        stepLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         timingReport.setEditable(false);
         timingReport.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         javax.swing.JTabbedPane bottomTabs = new javax.swing.JTabbedPane();
-        bottomTabs.addTab("Step log (P vs roll, signals, travel time)", new JScrollPane(stepLog));
         bottomTabs.addTab("Spread timing (vegetation & wind)", new JScrollPane(timingReport));
         bottomTabs.setPreferredSize(new Dimension(700, 200));
         middle.add(bottomTabs, BorderLayout.SOUTH);
@@ -162,12 +153,20 @@ public class SimulationGUI extends JFrame {
         fuelBox.add(randomFuelMode);
         fuelBox.add(rerollFuelButton);
         fuelBox.add(manualFuelMode);
-        fuelBox.add(materialCombo);
-        ButtonGroup clickGroup = new ButtonGroup();
-        clickGroup.add(clickIgnition);
-        clickGroup.add(clickPaint);
-        fuelBox.add(clickIgnition);
-        fuelBox.add(clickPaint);
+        // shown only in Manual fuel mode: which material to paint, and the explicit paint action
+        manualFuelPanel.setLayout(new BoxLayout(manualFuelPanel, BoxLayout.Y_AXIS));
+        manualFuelPanel.setBorder(BorderFactory.createEmptyBorder(0, 20, 0, 0));
+        manualFuelPanel.setAlignmentX(LEFT_ALIGNMENT);
+        materialCombo.setAlignmentX(LEFT_ALIGNMENT);
+        paintMaterialAction.setAlignmentX(LEFT_ALIGNMENT);
+        manualFuelPanel.add(materialCombo);
+        manualFuelPanel.add(paintMaterialAction);
+        fuelBox.add(manualFuelPanel);
+        randomFuelMode.setToolTipText("Every cell gets a weighted random material and fuel value");
+        manualFuelMode.setToolTipText("Choose a material and paint cells with it");
+        materialCombo.setToolTipText("Material that a click paints onto a cell");
+        paintMaterialAction.setToolTipText("Clicking a cell changes ONLY its vegetation/material; "
+                + "ignition points are not touched (a cell painted water or bare land loses its ignition point)");
         panel.add(fuelBox);
 
         JPanel fireBox = titled("Initial fires");
@@ -176,7 +175,19 @@ public class SimulationGUI extends JFrame {
         ignitionGroup.add(manualIgnitionMode);
         ignitionGroup.add(randomIgnitionMode);
         fireBox.add(manualIgnitionMode);
+        JPanel toggleRow = new JPanel();
+        toggleRow.setLayout(new BoxLayout(toggleRow, BoxLayout.Y_AXIS));
+        toggleRow.setBorder(BorderFactory.createEmptyBorder(0, 20, 0, 0));
+        toggleRow.setAlignmentX(LEFT_ALIGNMENT);
+        toggleRow.add(toggleIgnitionAction);
+        fireBox.add(toggleRow);
         fireBox.add(randomIgnitionMode);
+        manualIgnitionMode.setToolTipText("Choose start fires yourself by clicking cells");
+        randomIgnitionMode.setToolTipText("Place the configured number of fires on random cells that have fuel");
+        toggleIgnitionAction.setToolTipText("Clicking a cell adds or removes an ignition point; material is not changed. "
+                + "Water and other fuel-free cells cannot be ignition points");
+        gridActionGroup.add(paintMaterialAction);
+        gridActionGroup.add(toggleIgnitionAction);
         JPanel countRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         countRow.add(new JLabel("Number of fires"));
         countRow.add(fireCountSpinner);
@@ -189,7 +200,6 @@ public class SimulationGUI extends JFrame {
         JPanel windBox = titled("Wind (blows toward)");
         windBox.setLayout(new BoxLayout(windBox, BoxLayout.Y_AXIS));
         windBox.add(windLabel);
-        windBox.add(windIndicator);
         windBox.add(new JLabel("Direction (0=N, 90=E, 180=S, 270=W)"));
         windBox.add(windDirectionSlider);
         windBox.add(new JLabel("Speed (mph, Beaufort scale)"));
@@ -225,8 +235,6 @@ public class SimulationGUI extends JFrame {
         viewBox.add(showSignalsBox);
         viewBox.add(showProbabilityBox);
         viewBox.add(showSpreadPathBox);
-        viewBox.add(new JLabel("<html><small>Arrow width = signal strength.<br>"
-                + "Hover a cell to label its own signals.<br>White ring = ignited last step.</small></html>"));
         panel.add(viewBox);
 
         panel.add(Box.createVerticalGlue());
@@ -319,8 +327,9 @@ public class SimulationGUI extends JFrame {
         buttons.add(pauseButton);
         buttons.add(resumeButton);
         buttons.add(stepButton);
+        buttons.add(stopButton);
         buttons.add(resetButton);
-        buttons.add(experimentButton);
+        stopButton.setToolTipText("End the run now and keep the grid as it is (Reset to start again)");
         panel.add(buttons, BorderLayout.CENTER);
         statusBar.setBorder(BorderFactory.createEmptyBorder(2, 8, 4, 8));
         panel.add(statusBar, BorderLayout.SOUTH);
@@ -348,7 +357,6 @@ public class SimulationGUI extends JFrame {
     // ----- events -----
 
     private void wireEvents() {
-        experimentButton.addActionListener(e -> runExperiment());
         rowsSpinner.addChangeListener(e -> resizeFromSpinners());
         columnsSpinner.addChangeListener(e -> resizeFromSpinners());
         generateButton.addActionListener(e -> guarded(() -> {
@@ -359,14 +367,31 @@ public class SimulationGUI extends JFrame {
         }));
         rerollFuelButton.addActionListener(e -> guarded(controller::randomizeFuel));
         randomFuelMode.addActionListener(e -> {
-            clickIgnition.setSelected(true);
+            clickMode.setManualFuel(false);
             guarded(controller::randomizeFuel);
+            refreshAll();
         });
-        manualFuelMode.addActionListener(e -> refreshAll());
-        clickIgnition.addActionListener(e -> refreshAll());
-        clickPaint.addActionListener(e -> refreshAll());
-        manualIgnitionMode.addActionListener(e -> refreshAll());
-        randomIgnitionMode.addActionListener(e -> refreshAll());
+        manualFuelMode.addActionListener(e -> {
+            clickMode.setManualFuel(true); // explicitly switches the grid action to painting
+            refreshAll();
+        });
+        manualIgnitionMode.addActionListener(e -> {
+            clickMode.setManualIgnition(true); // explicitly switches the grid action to ignition toggling
+            refreshAll();
+        });
+        randomIgnitionMode.addActionListener(e -> {
+            clickMode.setManualIgnition(false);
+            refreshAll();
+        });
+        // one listener each: select the action first, then redraw (Swing fires listeners in reverse order)
+        paintMaterialAction.addActionListener(e -> {
+            guarded(() -> clickMode.select(GridClickMode.Action.PAINT_MATERIAL));
+            refreshAll();
+        });
+        toggleIgnitionAction.addActionListener(e -> {
+            guarded(() -> clickMode.select(GridClickMode.Action.TOGGLE_IGNITION));
+            refreshAll();
+        });
         placeFiresButton.addActionListener(e -> guarded(
                 () -> controller.randomizeIgnitions((Integer) fireCountSpinner.getValue())));
         clearFiresButton.addActionListener(e -> guarded(controller::clearIgnitions));
@@ -406,6 +431,10 @@ public class SimulationGUI extends JFrame {
             timer.stop();
             controller.step();
         }));
+        stopButton.addActionListener(e -> {
+            timer.stop();
+            controller.stop();
+        });
         resetButton.addActionListener(e -> {
             timer.stop();
             controller.reset();
@@ -415,25 +444,26 @@ public class SimulationGUI extends JFrame {
         gridPanel.setOnClick(this::handleClick);
     }
 
+    /** Shows the active grid action from {@link GridClickMode}; the two action radios can never both be on. */
+    private void syncGridActionControls(boolean idle) {
+        manualFuelPanel.setVisible(clickMode.isManualFuel());
+        materialCombo.setEnabled(idle && clickMode.isManualFuel());
+        paintMaterialAction.setEnabled(idle && clickMode.isManualFuel());
+        toggleIgnitionAction.setEnabled(idle && clickMode.isManualIgnition());
+        switch (clickMode.getAction()) {
+            case PAINT_MATERIAL -> paintMaterialAction.setSelected(true);
+            case TOGGLE_IGNITION -> toggleIgnitionAction.setSelected(true);
+            default -> gridActionGroup.clearSelection();
+        }
+    }
+
     private void handleClick(int row, int column) {
         inspect(row, column);
         if (controller.getStatus() != SimulationController.Status.IDLE) {
             return;
         }
-        guarded(() -> {
-            if (clickPaint.isSelected() && manualFuelMode.isSelected()) {
-                controller.paintCell(row, column, (MaterialType) materialCombo.getSelectedItem());
-            } else if (manualIgnitionMode.isSelected()) {
-                Cell cell = controller.getGrid().getCell(row, column);
-                if (controller.getIgnitionCells().contains(cell)) {
-                    controller.removeIgnition(row, column);
-                } else {
-                    controller.addIgnition(row, column);
-                }
-            } else {
-                statusBar.setText("Switch to 'Manual (click cells)' to choose ignition points by hand.");
-            }
-        });
+        guarded(() -> statusBar.setText(clickMode.apply(controller, row, column,
+                (MaterialType) materialCombo.getSelectedItem())));
     }
 
     /** Called by the Swing timer on the EDT: one short step per tick, never a long loop. */
@@ -454,7 +484,6 @@ public class SimulationGUI extends JFrame {
                 + "Model strength %.2f = min(1, %d mph / %.0f mph)</small></html>",
                 b.getForce(), b.getLabel(), b.getMphRange(), b.getKnotRange(), b.getDescription(),
                 wind.getStrength(), windSpeedSlider.getValue(), Wind.FULL_EFFECT_MPH));
-        windIndicator.repaint();
         if (gridPanel != null) {
             gridPanel.repaint(); // signal arrows and P% depend on the wind
             updateCellInfo();
@@ -602,70 +631,6 @@ public class SimulationGUI extends JFrame {
                 source.getRemainingFuel(), Math.max(0.0, source.getRemainingFuel() - cfg.getFuelConsumptionPerStep())));
     }
 
-    /** Appends the most recent step's tests to the step log (newest step on top). */
-    private void updateStepLog() {
-        StepTrace trace = controller.getLastTrace();
-        if (trace.getStep() == 0) {
-            if (lastLoggedStep != 0) {
-                stepLogEntries.clear();
-                lastLoggedStep = 0;
-                stepLog.setText("Press Step to see how each cell's neighbours decide whether it ignites.");
-            }
-            return;
-        }
-        if (trace.getStep() == lastLoggedStep) {
-            return;
-        }
-        lastLoggedStep = trace.getStep();
-        java.util.List<StepTrace.Evaluation> tests = new java.util.ArrayList<>(trace.getEvaluations());
-        tests.sort((a, b) -> a.isIgnited() != b.isIgnited() ? (a.isIgnited() ? -1 : 1)
-                : Double.compare(b.getProbability(), a.getProbability()));
-        long ignited = tests.stream().filter(StepTrace.Evaluation::isIgnited).count();
-        StringBuilder sb = new StringBuilder();
-        sb.append(String.format("STEP %d (t = %s) - phase 1: %d cell(s) tested, all from the start-of-step state; %d ignited%n",
-                trace.getStep(), controller.getConfig().formatSteps(trace.getStep()), tests.size(), ignited));
-        // on big n x m grids a step can test hundreds of cells; list ignitions first, then the likeliest
-        int misses = 0;
-        for (StepTrace.Evaluation e : tests) {
-            if (!e.isIgnited() && misses++ >= MAX_LOGGED_TESTS_PER_STEP) {
-                sb.append(String.format("  ... %d more test(s) with lower P, all 'no' (hover a cell for its details)%n",
-                        tests.size() - ignited - MAX_LOGGED_TESTS_PER_STEP));
-                break;
-            }
-            StringBuilder senders = new StringBuilder();
-            for (IgnitionBreakdown.Signal s : e.getBreakdown().getSignals()) {
-                if (senders.length() > 0) {
-                    senders.append(", ");
-                }
-                senders.append(String.format("%s->%s %.3f", s.getSource().getId(), s.getDirectionName(),
-                        s.getContribution()));
-            }
-            String travel = "";
-            if (e.isIgnited() && e.getTarget().getIgnitedBy() != null) {
-                Cell from = e.getTarget().getIgnitedBy();
-                travel = String.format("  travel %s->%s %d step(s) = %s, into %s",
-                        from.getId(), e.getTarget().getId(), e.getTarget().getTravelSteps(),
-                        controller.getConfig().formatSteps(e.getTarget().getTravelSteps()),
-                        e.getTarget().getMaterialType().getLabel());
-            }
-            sb.append(String.format("  %-6s P=%.4f roll=%.4f %-8s signals: %s%s%n", e.getTarget().getId(),
-                    e.getProbability(), e.getRoll(), e.isIgnited() ? "IGNITED" : "no", senders, travel));
-        }
-        StringBuilder out = new StringBuilder();
-        for (Cell c : trace.getBurnedOut()) {
-            out.append(out.length() > 0 ? ", " : "").append(c.getId());
-        }
-        sb.append(String.format("  phase 2: burning cells consumed %.2f fuel each; burned out: %s%n",
-                controller.getConfig().getFuelConsumptionPerStep(), out.length() == 0 ? "none" : out));
-        sb.append(String.format("  phase 3: %d new fire(s) lit together (they start sending signals next step)%n", ignited));
-        stepLogEntries.addFirst(sb.toString());
-        while (stepLogEntries.size() > 60) {
-            stepLogEntries.removeLast();
-        }
-        stepLog.setText(String.join("\n", stepLogEntries));
-        stepLog.setCaretPosition(0);
-    }
-
     private void refreshAll() {
         SimulationStatistics s = controller.getStatistics();
         SimulationController.Status status = controller.getStatus();
@@ -695,9 +660,7 @@ public class SimulationGUI extends JFrame {
         randomFuelMode.setEnabled(idle);
         manualFuelMode.setEnabled(idle);
         rerollFuelButton.setEnabled(idle && randomFuelMode.isSelected());
-        materialCombo.setEnabled(idle && manualFuelMode.isSelected());
-        clickPaint.setEnabled(idle && manualFuelMode.isSelected());
-        clickIgnition.setEnabled(idle);
+        syncGridActionControls(idle);
         manualIgnitionMode.setEnabled(idle);
         randomIgnitionMode.setEnabled(idle);
         fireCountSpinner.setEnabled(idle && randomIgnitionMode.isSelected());
@@ -710,6 +673,8 @@ public class SimulationGUI extends JFrame {
         resumeButton.setEnabled(status == SimulationController.Status.PAUSED);
         stepButton.setEnabled(status == SimulationController.Status.PAUSED
                 || (idle && (hasFires || randomIgnitionMode.isSelected())));
+        stopButton.setEnabled(status == SimulationController.Status.RUNNING
+                || status == SimulationController.Status.PAUSED);
         resetButton.setEnabled(status != SimulationController.Status.IDLE);
 
         switch (status) {
@@ -718,13 +683,15 @@ public class SimulationGUI extends JFrame {
                     : "Choose ignition points (click cells, or use random placement), then press Start.");
             case RUNNING -> statusBar.setText("Running...");
             case PAUSED -> statusBar.setText("Paused.");
-            case FINISHED -> statusBar.setText(String.format(
-                    "Finished at step %d: no cells burning. %.1f%% of the grid was affected. %s",
-                    s.getStep(), s.getPercentAffected(), outcomeDescription(s)));
+            case FINISHED -> statusBar.setText(controller.isStoppedByUser()
+                    ? String.format("Stopped by user at step %d (t = %s): %d cell(s) still burning, %.1f%% of the grid "
+                            + "affected. Press Reset to start again.", s.getStep(),
+                            controller.getConfig().formatSteps(s.getStep()), s.getBurning(), s.getPercentAffected())
+                    : String.format("Finished at step %d: no cells burning. %.1f%% of the grid was affected. %s",
+                            s.getStep(), s.getPercentAffected(), outcomeDescription(s)));
         }
         gridPanel.repaint();
         updateCellInfo();
-        updateStepLog();
     }
 
     /** Answers the professor's question: did the fire spread widely or die down? */
@@ -743,84 +710,6 @@ public class SimulationGUI extends JFrame {
                 : String.format("Outcome: the fire died down (%.0f%% of burnable cells).", percentOfBurnable);
     }
 
-    /** Runs the batch experiments off the EDT and shows the tables in a dialog. */
-    private void runExperiment() {
-        JTextArea output = new JTextArea(22, 70);
-        output.setEditable(false);
-        output.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        final int rows = controller.getGrid().getRows();
-        final int columns = controller.getGrid().getColumns();
-        // 100 runs per setting on small grids, fewer on large n x m grids so it finishes in seconds
-        final int runs = Math.max(10, Math.min(100, 10_000 / (rows * columns)));
-        output.setText("Running " + runs + " simulations per setting on a " + rows + " x " + columns + " grid...");
-        JDialog dialog = new JDialog(this, "Experiment: when does the fire spread?", false);
-        dialog.add(new JScrollPane(output));
-        dialog.pack();
-        dialog.setLocationRelativeTo(this);
-        dialog.setVisible(true);
-
-        final double direction = controller.getWind().getDirectionDegrees();
-        final double mph = controller.getWind().getSpeedMph();
-        final String compass = controller.getWind().compassName();
-        final int fires = (Integer) fireCountSpinner.getValue();
-        new SwingWorker<String, Void>() {
-            @Override
-            protected String doInBackground() {
-                ExperimentRunner runner = new ExperimentRunner(
-                        rows, columns, controller.getConfig(), System.nanoTime());
-                String first = ExperimentRunner.format(
-                        String.format("A) Number of initial fires (wind toward %s, %.0f mph, %s), %dx%d grid, random fuel each run",
-                                compass, mph, BeaufortScale.of(mph), rows, columns),
-                        runner.sweepInitialFires(8, runs, Wind.ofMph(direction, mph)));
-                String second = ExperimentRunner.format(
-                        String.format("B) Wind speed in mph, Beaufort force F (blowing toward %.0f deg), %d initial fire(s)",
-                                direction, fires),
-                        runner.sweepWindSpeed(fires, runs, direction));
-                return first + "\n" + second + "\n'Burned' = % of cells that had fuel. Major fire = more than "
-                        + ExperimentRunner.MAJOR_FIRE_FRACTION_PERCENT + "% burned.";
-            }
-
-            @Override
-            protected void done() {
-                try {
-                    output.setText(get());
-                } catch (Exception ex) {
-                    output.setText("Experiment failed: " + ex.getMessage());
-                }
-            }
-        }.execute();
-    }
-
-    /** Small compass-style arrow showing where the wind blows toward. */
-    private final class WindIndicator extends JPanel {
-        WindIndicator() {
-            setPreferredSize(new Dimension(70, 70));
-            setMaximumSize(new Dimension(70, 70));
-            setMinimumSize(new Dimension(70, 70)); // never squashed by the BoxLayout
-            setAlignmentX(LEFT_ALIGNMENT);
-        }
-
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g;
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int cx = getWidth() / 2;
-            int cy = getHeight() / 2;
-            g2.setColor(Color.LIGHT_GRAY);
-            g2.drawOval(cx - 30, cy - 30, 60, 60);
-            g2.setColor(Color.DARK_GRAY);
-            g2.drawString("N", cx - 4, cy - 32 + 10);
-            double rad = Math.toRadians(controller.getWind().getDirectionDegrees());
-            double length = 8 + 22 * controller.getWind().getStrength();
-            int ex = cx + (int) Math.round(Math.sin(rad) * length);
-            int ey = cy - (int) Math.round(Math.cos(rad) * length);
-            g2.setStroke(new BasicStroke(3f));
-            g2.setColor(new Color(30, 90, 200));
-            g2.drawLine(cx, cy, ex, ey);
-            g2.fillOval(ex - 4, ey - 4, 8, 8);
-        }
-    }
 
     public static void launch() {
         SwingUtilities.invokeLater(() -> {

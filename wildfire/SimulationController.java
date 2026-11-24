@@ -29,6 +29,7 @@ public class SimulationController {
     private Grid grid;
     private FireSpreadEngine engine;
     private Status status = Status.IDLE;
+    private boolean stoppedByUser;
 
     public SimulationController(int rows, int columns, SimulationConfig config, long seed) {
         this.config = config;
@@ -237,6 +238,23 @@ public class SimulationController {
         }
     }
 
+    /**
+     * Ends a running or paused simulation now. The grid keeps its current state for inspection;
+     * the run cannot be resumed. Use {@link #reset()} to start again.
+     */
+    public void stop() {
+        if (status == Status.RUNNING || status == Status.PAUSED) {
+            status = Status.FINISHED;
+            stoppedByUser = true;
+            fireChanged();
+        }
+    }
+
+    /** True when the run ended because the user pressed Stop (not because the fire burned out). */
+    public boolean isStoppedByUser() {
+        return stoppedByUser;
+    }
+
     public void resume() {
         if (status == Status.PAUSED) {
             status = Status.RUNNING;
@@ -271,6 +289,7 @@ public class SimulationController {
     public void reset() {
         grid.resetFire();
         engine.clearTrace();
+        stoppedByUser = false;
         random = new Random(seed);
         statistics.reset(grid);
         status = Status.IDLE;
